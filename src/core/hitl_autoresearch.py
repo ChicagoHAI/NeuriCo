@@ -6125,7 +6125,7 @@ class HitlAutoResearchController:
         from core.hitl_planning_discussion import (
             PlanningDiscussionRecordStore,
             planning_discussion_task_id,
-            project_initial_planning_discussion_segment,
+            require_initial_planning_discussion_capacity,
         )
 
         renderer = self.planning_discussion_prompt_template_renderer
@@ -6169,17 +6169,6 @@ class HitlAutoResearchController:
         initial_template, background = render(initial_id)
         opening_template, _ = render(opening_id)
         response_template, _ = render(response_id)
-        opening_projection, response_projection = (
-            project_initial_planning_discussion_segment(session)
-        )
-        opening_session, opening_missing = opening_projection
-        response_session, response_missing = response_projection
-        unfinished_initial = sum(
-            1
-            for task_id, task in session["tasks"].items()
-            if task_id.startswith("initial/")
-            and task.get("result_record_id") != task_id
-        )
         owner_prompt = planning_final_owner_prompt_template(
             self._proposal_hitl_runtime().plan_prompt_block(
                 approved_proposal=approved_proposal,
@@ -6191,25 +6180,19 @@ class HitlAutoResearchController:
                 },
             )
         )
-        final_projection = json.loads(json.dumps(response_session))
-        final_projection["phase"] = "final_writing"
         store = PlanningDiscussionRecordStore(attempt_dir)
         runtime = self._proposal_hitl_runtime()
-        checks = (
-            (session, initial_template, unfinished_initial),
-            (opening_session, opening_template, opening_missing),
-            (response_session, response_template, response_missing),
-            (final_projection, owner_prompt, response_missing),
-        )
         try:
-            for projected, template, reserve in checks:
-                runtime._require_planning_discussion_capacity(
-                    projected_session=projected,
-                    prompt_templates=(template,),
-                    public_background=background,
-                    reserve_contributions=reserve,
-                    record_store=store,
-                )
+            require_initial_planning_discussion_capacity(
+                runtime=runtime,
+                session=session,
+                record_store=store,
+                initial_prompt_template=initial_template,
+                opening_prompt_template=opening_template,
+                response_prompt_template=response_template,
+                final_owner_prompt_template=owner_prompt,
+                public_background=background,
+            )
         except ValueError as exc:
             raise HitlTerminalRuntimeError(
                 "Collaborative planning cannot fit its mandatory first segment in "

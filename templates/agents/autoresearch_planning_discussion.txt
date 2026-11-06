@@ -3,20 +3,28 @@ Participant 1 is the lead. This is a finite task, not a persistent conversation.
 
 {% include "hitl/worker_background_job_contract.txt" %}
 
+{% if candidate_planning %}
 {% include "hitl/worker_autoresearch_candidate_boundary.txt" %}
+{% endif %}
 
 {% set suppress_proposal_submission = true %}
 {% include "hitl/worker_autonomous_idea_contract.txt" %}
 
 Your task is {{ task_label }}.
 
+{% if candidate_planning %}
 The proposal direction has already been admitted. Make that direction executable;
-do not generate or submit a replacement proposal. Do not edit the research
-workspace, the AutoResearch whiteboard, or the formal plan. Do not perform
-execution work. Use `hitl-view-ideas` and `hitl-view-discussion` when their
-information is relevant. Do not inspect runtime state, raw idea logs, peer
-launch artifacts, or discussion files.
+do not generate or submit a replacement proposal.
+{% else %}
+Discuss the bounded planning task supplied below. Do not replace it with a
+different stage objective.
+{% endif %}
+Do not edit the research workspace, the AutoResearch whiteboard, or the formal
+plan. Do not perform execution work. Use `hitl-view-ideas` and
+`hitl-view-discussion` when their information is relevant. Do not inspect
+runtime state, raw idea logs, peer launch artifacts, or discussion files.
 
+{% if candidate_planning %}
 Runtime-approved proposal:
 
 --- BEGIN RUNTIME-APPROVED PROPOSAL ---
@@ -34,6 +42,13 @@ Active whiteboard tips are read-only:
 {{ whiteboard_active_tips_md }}
 
 {{ compute_backend_section }}
+{% else %}
+Planning task background:
+
+--- BEGIN PLANNING TASK BACKGROUND ---
+{{ planning_task_background }}
+--- END PLANNING TASK BACKGROUND ---
+{% endif %}
 
 The eventual formal plan must satisfy this existing content contract:
 
@@ -42,7 +57,7 @@ The eventual formal plan must satisfy this existing content contract:
 {{ discussion_context }}
 
 {% if task_phase == "initial" %}
-Independently propose a complete execution approach for the admitted proposal.
+Independently propose a complete execution approach for the planning task.
 Cover concrete steps and dependencies, artifacts to create or change, evidence
 that would show each important step worked, implementation and evaluation risks,
 and conditions requiring escalation or plan revision. Do not assume another

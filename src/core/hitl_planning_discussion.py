@@ -1062,8 +1062,19 @@ class PlanningDiscussionRecordStore(DiscussionRecordStore):
     """Public planning records for one physical AutoResearch attempt."""
 
     def __init__(self, attempt_dir: Path):
+        self._initialize(Path(attempt_dir) / "planning_discussion")
+
+    @classmethod
+    def from_root(cls, root: Path) -> "PlanningDiscussionRecordStore":
+        """Bind a stage meeting's already-derived canonical record root."""
+
+        store = cls.__new__(cls)
+        store._initialize(Path(root))
+        return store
+
+    def _initialize(self, root: Path) -> None:
         super().__init__(
-            Path(attempt_dir) / "planning_discussion",
+            root,
             record_subject="Planning discussion",
             normalize_record=normalize_planning_discussion_record,
             record_public_text=_planning_record_public_text,
@@ -1230,6 +1241,48 @@ def project_initial_planning_discussion_segment(
         )
     )
     return opening_projection, (projected, missing)
+
+
+def require_initial_planning_discussion_capacity(
+    *,
+    runtime: Any,
+    session: Mapping[str, Any],
+    record_store: PlanningDiscussionRecordStore,
+    initial_prompt_template: str,
+    opening_prompt_template: str,
+    response_prompt_template: str,
+    final_owner_prompt_template: str,
+    public_background: Mapping[str, Any],
+) -> None:
+    """Reserve the exact mandatory first segment before participants launch."""
+
+    opening_projection, response_projection = (
+        project_initial_planning_discussion_segment(session)
+    )
+    opening_session, opening_missing = opening_projection
+    response_session, response_missing = response_projection
+    unfinished_initial = sum(
+        1
+        for task_id, task in session["tasks"].items()
+        if task_id.startswith("initial/")
+        and task.get("result_record_id") != task_id
+    )
+    final_projection = json.loads(json.dumps(response_session))
+    final_projection["phase"] = "final_writing"
+    checks = (
+        (dict(session), initial_prompt_template, unfinished_initial),
+        (opening_session, opening_prompt_template, opening_missing),
+        (response_session, response_prompt_template, response_missing),
+        (final_projection, final_owner_prompt_template, response_missing),
+    )
+    for projected, template, reserve in checks:
+        runtime._require_planning_discussion_capacity(
+            projected_session=projected,
+            prompt_templates=(template,),
+            public_background=dict(public_background),
+            reserve_contributions=reserve,
+            record_store=record_store,
+        )
 
 
 def project_next_planning_discussion_response(

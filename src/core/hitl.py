@@ -144,7 +144,9 @@ _DISCUSSION_COMMAND_PROFILES = {
     },
     "planning_discussion_turn": {
         "discussion_kind": "planning",
-        "actor": "comment_handler",
+        "actors": frozenset(
+            {"comment_handler", "resource_finder", "rule_maker", "experiment_runner"}
+        ),
         "hitl_stage": "plan",
         "discussion_phases": frozenset({"initial", "opening", "response"}),
         "commands": {
@@ -156,7 +158,9 @@ _DISCUSSION_COMMAND_PROFILES = {
     },
     "planning_discussion_decision": {
         "discussion_kind": "planning",
-        "actor": "comment_handler",
+        "actors": frozenset(
+            {"comment_handler", "resource_finder", "rule_maker", "experiment_runner"}
+        ),
         "hitl_stage": "plan",
         "discussion_phases": frozenset({"decision"}),
         "commands": {
@@ -534,6 +538,7 @@ def visible_discussion_idea_records(
     discussion_turn_id: str,
     discussion_state: Dict[str, Any],
     actor: str = "autoresearch_proposer",
+    pipeline_stage: str = "",
     hitl_stage: str = "proposal",
     discussion_kind: str = "proposal",
     seed_idea_ids: Iterable[str] = (),
@@ -557,15 +562,16 @@ def visible_discussion_idea_records(
     else:
         raise HitlValidationError("Discussion idea visibility has an invalid kind.")
 
-    if not str(parent_node_id).strip() or not str(candidate_attempt_id).strip():
+    has_parent = bool(str(parent_node_id).strip())
+    has_attempt = bool(str(candidate_attempt_id).strip())
+    if has_parent != has_attempt:
         raise HitlValidationError(
-            "Discussion idea visibility requires parent and attempt identity."
+            "Discussion idea visibility requires both parent and attempt identity or neither."
         )
     if not isinstance(discussion_state, dict):
         raise HitlValidationError("Discussion idea visibility requires meeting state.")
-    if str(discussion_state.get("candidate_attempt_id", "")) != str(
-        candidate_attempt_id
-    ):
+    physical_attempt = str(discussion_state.get("candidate_attempt_id", "")).strip()
+    if physical_attempt and physical_attempt != str(candidate_attempt_id):
         raise HitlValidationError(
             "Discussion idea visibility does not match its physical attempt."
         )
@@ -612,10 +618,14 @@ def visible_discussion_idea_records(
     published_ids: set[str] = set()
     for idea_id, record in records_by_id.items():
         if (
-            str(record.get("parent_node_id", "")) != str(parent_node_id)
-            or str(record.get("attempt_id", "")) != str(candidate_attempt_id)
+            (has_parent and str(record.get("parent_node_id", "")) != str(parent_node_id))
+            or (has_attempt and str(record.get("attempt_id", "")) != str(candidate_attempt_id))
             or str(record.get("actor", "")) != str(actor)
             or str(record.get("hitl_stage", "")) != str(hitl_stage)
+            or (
+                str(pipeline_stage).strip()
+                and str(record.get("pipeline_stage", "")) != str(pipeline_stage)
+            )
         ):
             continue
         record_turn_id = str(record.get("discussion_turn_id", "")).strip()
@@ -1281,6 +1291,9 @@ class HitlIdeaLog:
             if discussion_actor_stage not in {
                 ("autoresearch_proposer", "proposal"),
                 ("comment_handler", "plan"),
+                ("resource_finder", "plan"),
+                ("rule_maker", "plan"),
+                ("experiment_runner", "plan"),
             }:
                 if record.get("hitl_stage") == "proposal":
                     raise HitlValidationError(
@@ -1288,12 +1301,13 @@ class HitlIdeaLog:
                         "actor."
                     )
                 raise HitlValidationError(
-                    "Planning discussion turn provenance requires the comment handler "
+                    "Planning discussion turn provenance requires a recognized planning "
                     "actor at the plan stage."
                 )
-            if not str(record.get("parent_node_id", "")).strip() or not str(
-                record.get("attempt_id", "")
-            ).strip():
+            if actor in {"autoresearch_proposer", "comment_handler"} and (
+                not str(record.get("parent_node_id", "")).strip()
+                or not str(record.get("attempt_id", "")).strip()
+            ):
                 raise HitlValidationError(
                     "Discussion turn provenance requires parent_node_id and attempt_id."
                 )
@@ -1878,6 +1892,8 @@ class HitlRuntime:
         proposal_preparation_attempt_id: Optional[str] = None,
         proposal_discussion_attempt_dir: Optional[Path] = None,
         planning_discussion_attempt_dir: Optional[Path] = None,
+        planning_discussion_record_dir: Optional[Path] = None,
+        planning_discussion_stage_owner: Optional[Dict[str, Any]] = None,
         proposal_discussion_final_owner: bool = False,
         planning_discussion_final_owner: bool = False,
         planning_discussion_prompt_composer: Optional[Callable[..., str]] = None,
@@ -1911,6 +1927,68 @@ class HitlRuntime:
             if planning_discussion_attempt_dir is not None
             else None
         )
+        normalized_planning_discussion_record_dir = (
+            Path(planning_discussion_record_dir).resolve()
+            if planning_discussion_record_dir is not None
+            else None
+        )
+        if planning_discussion_stage_owner is None:
+            normalized_planning_stage_owner = None
+        else:
+            from core.hitl_planning_discussion import (
+                normalize_stage_planning_discussion_owner,
+            )
+
+            try:
+                normalized_planning_stage_owner = (
+                    normalize_stage_planning_discussion_owner(
+                        planning_discussion_stage_owner
+                    )
+                )
+            except ValueError as exc:
+                raise HitlValidationError(str(exc)) from exc
+        if (
+            normalized_planning_stage_owner is not None
+            and normalized_planning_discussion_attempt_dir is not None
+        ):
+            raise HitlValidationError(
+                "Planning discussion tools cannot bind candidate and stage state together."
+            )
+        if (
+            normalized_planning_stage_owner is None
+            and normalized_planning_discussion_record_dir is not None
+        ):
+            raise HitlValidationError(
+                "A stage planning record directory requires its stage owner."
+            )
+        stage_owner_provenance_matches = False
+        if normalized_planning_stage_owner is not None:
+            if normalized_planning_stage_owner["kind"] == "initial_stage":
+                stage_owner_provenance_matches = not any(
+                    str(normalized_provenance.get(key, "")).strip()
+                    for key in (
+                        "parent_node_id",
+                        "attempt_id",
+                        "additional_agent_ordinal",
+                    )
+                )
+            else:
+                stage_owner_provenance_matches = all(
+                    (
+                        str(normalized_provenance.get("parent_node_id", "")).strip()
+                        == str(normalized_planning_stage_owner["parent_node_id"]),
+                        str(normalized_provenance.get("attempt_id", "")).strip()
+                        == str(normalized_planning_stage_owner["attempt_id"]),
+                        str(
+                            normalized_provenance.get("additional_agent_ordinal", "")
+                        ).strip()
+                        == str(
+                            normalized_planning_stage_owner[
+                                "additional_agent_ordinal"
+                            ]
+                        ),
+                    )
+                )
         if profile == "default":
             if self.tool_scope is not None or idea_visibility is not None or scoped_task_cancel_event is not None:
                 raise HitlValidationError(
@@ -1933,18 +2011,35 @@ class HitlRuntime:
                         "Collaborative final-owner tools require their proposal discussion identity."
                     )
             elif normalized_planning_final_owner:
+                candidate_owner = normalized_planning_stage_owner is None
+                valid_candidate_owner = bool(
+                    candidate_owner
+                    and self.pipeline_stage == "experiment_runner"
+                    and normalized_actor == "comment_handler"
+                    and normalized_preparation_attempt_id
+                    and normalized_planning_discussion_attempt_dir is not None
+                    and normalized_planning_discussion_record_dir is None
+                    and str(normalized_provenance.get("parent_node_id", "")).strip()
+                    and str(normalized_provenance.get("attempt_id", "")).strip()
+                    and str(normalized_provenance.get("proposal_idea_id", "")).strip()
+                    and normalized_planning_discussion_attempt_dir.name
+                    == str(normalized_provenance.get("attempt_id", "")).strip()
+                )
+                valid_stage_owner = bool(
+                    not candidate_owner
+                    and normalized_planning_stage_owner is not None
+                    and self.pipeline_stage
+                    == normalized_planning_stage_owner["pipeline_stage"]
+                    and normalized_actor == self.pipeline_stage
+                    and not normalized_preparation_attempt_id
+                    and normalized_planning_discussion_attempt_dir is None
+                    and normalized_planning_discussion_record_dir is not None
+                    and stage_owner_provenance_matches
+                )
                 if (
-                    self.pipeline_stage != "experiment_runner"
-                    or hitl_stage != "plan"
-                    or normalized_actor != "comment_handler"
-                    or not normalized_preparation_attempt_id
-                    or normalized_planning_discussion_attempt_dir is None
+                    hitl_stage != "plan"
                     or normalized_proposal_discussion_attempt_dir is not None
-                    or not str(normalized_provenance.get("parent_node_id", "")).strip()
-                    or not str(normalized_provenance.get("attempt_id", "")).strip()
-                    or not str(normalized_provenance.get("proposal_idea_id", "")).strip()
-                    or normalized_planning_discussion_attempt_dir.name
-                    != str(normalized_provenance.get("attempt_id", "")).strip()
+                    or not (valid_candidate_owner or valid_stage_owner)
                 ):
                     raise HitlValidationError(
                         "Collaborative plan-owner tools require their planning discussion identity."
@@ -1953,6 +2048,8 @@ class HitlRuntime:
                 normalized_preparation_attempt_id
                 or normalized_proposal_discussion_attempt_dir is not None
                 or normalized_planning_discussion_attempt_dir is not None
+                or normalized_planning_discussion_record_dir is not None
+                or normalized_planning_stage_owner is not None
             ):
                 raise HitlValidationError(
                     "Scoped proposal tools require a closed ranked command profile."
@@ -2008,17 +2105,39 @@ class HitlRuntime:
         else:
             from core.hitl_discussion import parse_discussion_task_id
 
+            discussion_kind = str(profile_spec["discussion_kind"])
+            stage_planning = bool(
+                discussion_kind == "planning"
+                and normalized_planning_stage_owner is not None
+            )
+            if self.tool_scope is None or self._tool_scope_kind != "discussion":
+                raise HitlValidationError(
+                    "Discussion command profiles require a scoped discussion runtime."
+                )
+            expected_actor = profile_spec.get("actor")
+            allowed_actors = profile_spec.get("actors")
             if (
-                self.pipeline_stage != "experiment_runner"
-                or self.tool_scope is None
-                or self._tool_scope_kind != "discussion"
+                expected_actor is not None
+                and normalized_actor != expected_actor
+            ) or (
+                allowed_actors is not None
+                and normalized_actor not in allowed_actors
             ):
                 raise HitlValidationError(
-                    "Discussion command profiles require a scoped experiment-runner runtime."
-                )
-            if normalized_actor != profile_spec["actor"]:
-                raise HitlValidationError(
                     "Discussion command profile does not match its worker actor."
+                )
+            if stage_planning and (
+                self.pipeline_stage
+                != normalized_planning_stage_owner["pipeline_stage"]
+                or normalized_actor != self.pipeline_stage
+                or not stage_owner_provenance_matches
+            ):
+                raise HitlValidationError(
+                    "Planning discussion profile does not match its stage invocation."
+                )
+            if not stage_planning and self.pipeline_stage != "experiment_runner":
+                raise HitlValidationError(
+                    "Candidate discussion profiles require an experiment-runner runtime."
                 )
             if hitl_stage != profile_spec["hitl_stage"]:
                 raise HitlValidationError(
@@ -2033,8 +2152,16 @@ class HitlRuntime:
                 task_id != self.tool_scope
                 or task_identity.phase not in profile_spec["discussion_phases"]
                 or str(normalized_provenance.get("proposal_task_id", "")).strip()
-                or not str(normalized_provenance.get("parent_node_id", "")).strip()
-                or not str(normalized_provenance.get("attempt_id", "")).strip()
+                or (
+                    not stage_planning
+                    and not str(
+                        normalized_provenance.get("parent_node_id", "")
+                    ).strip()
+                )
+                or (
+                    not stage_planning
+                    and not str(normalized_provenance.get("attempt_id", "")).strip()
+                )
             ):
                 raise HitlValidationError(
                     "Discussion command profile does not match its runtime provenance."
@@ -2043,11 +2170,10 @@ class HitlRuntime:
                 raise HitlValidationError(
                     "Discussion command profiles require derived idea visibility inputs."
                 )
-            if not normalized_preparation_attempt_id:
+            if not stage_planning and not normalized_preparation_attempt_id:
                 raise HitlValidationError(
                     "Discussion command profiles require their proposal preparation attempt."
                 )
-            discussion_kind = str(profile_spec["discussion_kind"])
             normalized_discussion_attempt_dir = (
                 normalized_proposal_discussion_attempt_dir
                 if discussion_kind == "proposal"
@@ -2058,17 +2184,26 @@ class HitlRuntime:
                 if discussion_kind == "proposal"
                 else normalized_proposal_discussion_attempt_dir
             )
-            if (
-                normalized_discussion_attempt_dir is None
-                or unused_discussion_attempt_dir is not None
-                or normalized_discussion_attempt_dir.name
-                != str(normalized_provenance.get("attempt_id", "")).strip()
-            ):
+            candidate_directory_valid = bool(
+                normalized_discussion_attempt_dir is not None
+                and unused_discussion_attempt_dir is None
+                and normalized_discussion_attempt_dir.name
+                == str(normalized_provenance.get("attempt_id", "")).strip()
+                and normalized_planning_discussion_record_dir is None
+            )
+            stage_directory_valid = bool(
+                stage_planning
+                and normalized_discussion_attempt_dir is None
+                and unused_discussion_attempt_dir is None
+                and normalized_planning_discussion_record_dir is not None
+            )
+            if not (stage_directory_valid or candidate_directory_valid):
+                directory_kind = "record" if stage_planning else "attempt"
                 raise HitlValidationError(
                     "Discussion command profiles require their matching "
-                    f"{discussion_kind} attempt directory."
+                    f"{discussion_kind} {directory_kind} directory."
                 )
-            if discussion_kind == "planning" and not str(
+            if discussion_kind == "planning" and not stage_planning and not str(
                 normalized_provenance.get("proposal_idea_id", "")
             ).strip():
                 raise HitlValidationError(
@@ -2166,6 +2301,20 @@ class HitlRuntime:
                     )
                 }
                 if normalized_planning_discussion_attempt_dir is not None
+                else {}
+            ),
+            **(
+                {
+                    "planning_discussion_record_dir": str(
+                        normalized_planning_discussion_record_dir
+                    )
+                }
+                if normalized_planning_discussion_record_dir is not None
+                else {}
+            ),
+            **(
+                {"planning_discussion_stage_owner": normalized_planning_stage_owner}
+                if normalized_planning_stage_owner is not None
                 else {}
             ),
             "proposal_discussion_final_owner": normalized_discussion_final_owner,
@@ -2679,7 +2828,10 @@ class HitlRuntime:
             seed_idea_ids = _normalize_premises(
                 visibility.get("seed_idea_ids", ())
             )
-            if profile_spec.get("discussion_kind") == "planning":
+            if (
+                profile_spec.get("discussion_kind") == "planning"
+                and "admitted_proposal_idea_id" in task_context["session"]
+            ):
                 seed_idea_ids.append(
                     str(task_context["session"]["admitted_proposal_idea_id"])
                 )
@@ -2689,7 +2841,8 @@ class HitlRuntime:
                 candidate_attempt_id=provenance.get("attempt_id", ""),
                 discussion_turn_id=provenance.get("discussion_turn_id", ""),
                 discussion_state=task_context["session"],
-                actor=str(profile_spec["actor"]),
+                actor=str(self._tool_context.get("actor", "")),
+                pipeline_stage=str(self._tool_context.get("pipeline_stage", "")),
                 hitl_stage=str(profile_spec["hitl_stage"]),
                 discussion_kind=str(profile_spec["discussion_kind"]),
                 seed_idea_ids=seed_idea_ids,
@@ -2753,17 +2906,36 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Discussion task access does not match its authenticated task session."
             )
-        identity = {
-            "parent_node_sha": str(provenance.get("parent_node_id", "")).strip(),
-            "preparation_attempt_id": str(
-                self._tool_context.get("proposal_preparation_attempt_id", "")
-            ).strip(),
-            "candidate_attempt_id": str(provenance.get("attempt_id", "")).strip(),
-        }
-        if not all(identity.values()):
-            raise HitlValidationError("Discussion task access has incomplete identity.")
         state = HitlRuntimeState(self.work_dir)
         discussion_kind = str(profile_spec["discussion_kind"])
+        stage_owner = self._tool_context.get("planning_discussion_stage_owner")
+        identity: Dict[str, str] = {}
+        planning_binding = None
+        if discussion_kind == "planning" and isinstance(stage_owner, dict):
+            try:
+                planning_binding = state.bind_stage_planning_discussion(
+                    owner=stage_owner
+                )
+            except HitlRuntimeStateError as exc:
+                raise HitlValidationError(str(exc)) from exc
+        else:
+            identity = {
+                "parent_node_sha": str(
+                    provenance.get("parent_node_id", "")
+                ).strip(),
+                "preparation_attempt_id": str(
+                    self._tool_context.get("proposal_preparation_attempt_id", "")
+                ).strip(),
+                "candidate_attempt_id": str(
+                    provenance.get("attempt_id", "")
+                ).strip(),
+            }
+            if not all(identity.values()):
+                raise HitlValidationError(
+                    "Discussion task access has incomplete identity."
+                )
+            if discussion_kind == "planning":
+                planning_binding = state.bind_candidate_planning_discussion(**identity)
         try:
             if discussion_kind == "proposal" and allow_completed:
                 session = state.proposal_discussion_snapshot(**identity)
@@ -2779,15 +2951,12 @@ class HitlRuntime:
                 session = active["session"]
                 task = active["task"]
             elif allow_completed:
-                session = state.planning_discussion_snapshot(**identity)
-                task = state.planning_discussion_task_snapshot(
-                    **identity,
-                    discussion_task_id=task_id,
-                )
+                session = planning_binding.snapshot()
+                task = planning_binding.task_snapshot(task_id)
             else:
-                active = state.active_planning_discussion_task_snapshot(
-                    **identity,
-                    discussion_task_id=task_id,
+                active = planning_binding.task_snapshot(
+                    task_id,
+                    require_active=True,
                 )
                 session = active["session"]
                 task = active["task"]
@@ -2804,9 +2973,9 @@ class HitlRuntime:
                         discussion_task_id=task_id,
                     )
                 else:
-                    active = state.active_planning_discussion_task_snapshot(
-                        **identity,
-                        discussion_task_id=task_id,
+                    active = planning_binding.task_snapshot(
+                        task_id,
+                        require_active=True,
                     )
             except HitlRuntimeStateError as exc:
                 raise HitlValidationError(str(exc)) from exc
@@ -2822,15 +2991,21 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Discussion task visibility does not match its durable meeting boundary."
             )
-        if discussion_kind == "planning" and str(
-            provenance.get("proposal_idea_id", "")
-        ).strip() != str(session.get("admitted_proposal_idea_id", "")).strip():
+        if (
+            discussion_kind == "planning"
+            and not isinstance(stage_owner, dict)
+            and str(
+                provenance.get("proposal_idea_id", "")
+            ).strip()
+            != str(session.get("admitted_proposal_idea_id", "")).strip()
+        ):
             raise HitlValidationError(
                 "Planning discussion task does not match its admitted proposal premise."
             )
         return {
             "state": state,
             "identity": identity,
+            "planning_binding": planning_binding,
             "session": session,
             "task": task,
             "task_id": task_id,
@@ -3029,6 +3204,11 @@ class HitlRuntime:
     def _planning_discussion_record_store(self):
         from core.hitl_planning_discussion import PlanningDiscussionRecordStore
 
+        record_dir = str(
+            self._tool_context.get("planning_discussion_record_dir", "")
+        ).strip()
+        if record_dir:
+            return PlanningDiscussionRecordStore.from_root(Path(record_dir))
         attempt_dir = str(
             self._tool_context.get("planning_discussion_attempt_dir", "")
         ).strip()
@@ -3374,20 +3554,20 @@ class HitlRuntime:
                     task_context=task_context,
                     result=normalized,
                 )
-            state_args = {
-                **task_context["identity"],
-                "discussion_task_id": task_context["task_id"],
-            }
-            begin_finalization = (
-                task_context["state"].begin_planning_discussion_task_finalization
-                if task_context["discussion_kind"] == "planning"
-                else task_context["state"].begin_proposal_discussion_task_finalization
-            )
             try:
-                intent = begin_finalization(
-                    **state_args,
-                    normalized_output=normalized,
-                )
+                if task_context["discussion_kind"] == "planning":
+                    intent = task_context["planning_binding"].begin_task_finalization(
+                        task_context["task_id"],
+                        normalized,
+                    )
+                else:
+                    intent = task_context[
+                        "state"
+                    ].begin_proposal_discussion_task_finalization(
+                        **task_context["identity"],
+                        discussion_task_id=task_context["task_id"],
+                        normalized_output=normalized,
+                    )
             except HitlRuntimeStateError as exc:
                 raise HitlValidationError(str(exc)) from exc
             try:
@@ -3398,17 +3578,22 @@ class HitlRuntime:
                 )
             except (RuntimeError, ValueError) as exc:
                 raise HitlValidationError(str(exc)) from exc
-            complete_finalization = (
-                task_context["state"].complete_planning_discussion_task_finalization
-                if task_context["discussion_kind"] == "planning"
-                else task_context["state"].complete_proposal_discussion_task_finalization
-            )
             try:
-                complete_finalization(
-                    **state_args,
-                    normalized_output=intent,
-                    result_record_id=record["record_id"],
-                )
+                if task_context["discussion_kind"] == "planning":
+                    task_context["planning_binding"].complete_task_finalization(
+                        task_context["task_id"],
+                        intent,
+                        record["record_id"],
+                    )
+                else:
+                    task_context[
+                        "state"
+                    ].complete_proposal_discussion_task_finalization(
+                        **task_context["identity"],
+                        discussion_task_id=task_context["task_id"],
+                        normalized_output=intent,
+                        result_record_id=record["record_id"],
+                    )
             except HitlRuntimeStateError as exc:
                 raise HitlValidationError(str(exc)) from exc
             self._tool_context["scoped_task_terminal"] = True
@@ -3544,18 +3729,18 @@ class HitlRuntime:
 
             failed = _provider_failure_counter_update(result)
             if failed is not None:
-                record_provider_result = (
-                    task_context["state"].record_planning_discussion_task_provider_result
-                    if task_context["discussion_kind"] == "planning"
-                    else task_context[
+                if task_context["discussion_kind"] == "planning":
+                    failures = task_context["planning_binding"].record_provider_result(
+                        task_context["task_id"], failed
+                    )
+                else:
+                    failures = task_context[
                         "state"
-                    ].record_proposal_discussion_task_provider_result
-                )
-                failures = record_provider_result(
-                    **task_context["identity"],
-                    discussion_task_id=task_context["task_id"],
-                    failed=failed,
-                )
+                    ].record_proposal_discussion_task_provider_result(
+                        **task_context["identity"],
+                        discussion_task_id=task_context["task_id"],
+                        failed=failed,
+                    )
                 self._stop_after_provider_failure_threshold(failures)
 
             prompt_block = self._replacement_prompt_after_worker_exit(
@@ -5450,34 +5635,53 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Collaborative plan-owner access requires runtime provenance."
             )
-        identity = {
-            "parent_node_sha": str(provenance.get("parent_node_id", "")).strip(),
-            "preparation_attempt_id": str(
-                self._tool_context.get("proposal_preparation_attempt_id", "")
-            ).strip(),
-            "candidate_attempt_id": str(provenance.get("attempt_id", "")).strip(),
-        }
-        if not all(identity.values()):
-            raise HitlValidationError(
-                "Collaborative plan-owner access has incomplete identity."
-            )
         from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
 
+        state = HitlRuntimeState(self.work_dir)
+        stage_owner = self._tool_context.get("planning_discussion_stage_owner")
         try:
-            session = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
-                **identity
-            )
+            if isinstance(stage_owner, dict):
+                binding = state.bind_stage_planning_discussion(owner=stage_owner)
+                identity: Dict[str, str] = {}
+            else:
+                identity = {
+                    "parent_node_sha": str(
+                        provenance.get("parent_node_id", "")
+                    ).strip(),
+                    "preparation_attempt_id": str(
+                        self._tool_context.get(
+                            "proposal_preparation_attempt_id", ""
+                        )
+                    ).strip(),
+                    "candidate_attempt_id": str(
+                        provenance.get("attempt_id", "")
+                    ).strip(),
+                }
+                if not all(identity.values()):
+                    raise HitlValidationError(
+                        "Collaborative plan-owner access has incomplete identity."
+                    )
+                binding = state.bind_candidate_planning_discussion(**identity)
+            session = binding.snapshot()
         except HitlRuntimeStateError as exc:
             raise HitlValidationError(str(exc)) from exc
         if (
             session.get("phase") not in {"final_writing", "reopen_pending"}
-            or str(session.get("admitted_proposal_idea_id", "")).strip()
-            != str(provenance.get("proposal_idea_id", "")).strip()
+            or (
+                not isinstance(stage_owner, dict)
+                and str(session.get("admitted_proposal_idea_id", "")).strip()
+                != str(provenance.get("proposal_idea_id", "")).strip()
+            )
         ):
             raise HitlValidationError(
                 "Planning discussion records are not owned by the active plan writer."
             )
-        return {"identity": identity, "session": session, "discussion_kind": "planning"}
+        return {
+            "identity": identity,
+            "session": session,
+            "planning_binding": binding,
+            "discussion_kind": "planning",
+        }
 
     def _proposal_discussion_final_owner_state_context(self) -> Dict[str, Any]:
         """Return the exact collaborative session owned by this final proposer."""
@@ -5614,7 +5818,6 @@ class HitlRuntime:
             planning_discussion_reopen_source_idea_ids,
         )
         from core.hitl_run_control import current_hitl_run_budget_prompt
-        from core.hitl_runtime_state import HitlRuntimeState
 
         with self._tool_lock:
             task_context = self._discussion_task_state_context()
@@ -5653,9 +5856,7 @@ class HitlRuntime:
                 )
 
             def current_session() -> Dict[str, Any]:
-                return HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
-                    **task_context["identity"]
-                )
+                return task_context["planning_binding"].snapshot()
 
             store = self._planning_discussion_record_store()
             source_ids = planning_discussion_reopen_source_idea_ids(

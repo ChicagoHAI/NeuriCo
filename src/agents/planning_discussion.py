@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from agents.autoresearch_proposer import (
     _generate_compute_backend_section,
@@ -44,10 +44,36 @@ def _planning_discussion_prompt_inputs(
     }
 
 
+def stage_planning_discussion_subject(
+    *,
+    pipeline_stage: str,
+    planning_context: str,
+) -> Dict[str, str]:
+    """Build the minimal shared subject for one existing stage planning task."""
+
+    stage = str(pipeline_stage).strip()
+    context = str(planning_context).strip()
+    if stage not in {"resource_finder", "rule_maker", "experiment_runner"}:
+        raise ValueError("Planning discussion subject has an unsupported stage")
+    if not context:
+        raise ValueError("Planning discussion subject requires its stage context")
+    return {"pipeline_stage": stage, "planning_context": context}
+
+
+def _normalize_stage_planning_subject(value: Mapping[str, Any]) -> Dict[str, str]:
+    if set(value) != {"pipeline_stage", "planning_context"}:
+        raise ValueError("Planning discussion subject contains unsupported fields")
+    return stage_planning_discussion_subject(
+        pipeline_stage=str(value.get("pipeline_stage", "")),
+        planning_context=str(value.get("planning_context", "")),
+    )
+
+
 def _render_planning_discussion_prompt(
     *,
     idea: Dict[str, Any],
     approved_proposal: str,
+    planning_subject: Optional[Mapping[str, Any]],
     discussion_task_id: str,
     discussion_context: str,
     assigned_candidate_sha: str,
@@ -75,11 +101,18 @@ def _render_planning_discussion_prompt(
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    subject = (
+        _normalize_stage_planning_subject(planning_subject)
+        if planning_subject is not None
+        else None
+    )
     return environment.get_template(
         "agents/autoresearch_planning_discussion.txt"
     ).render(
         title=str(idea.get("idea", idea).get("title", "Untitled Research")),
-        pipeline_stage="experiment_runner",
+        pipeline_stage=(
+            subject["pipeline_stage"] if subject is not None else "experiment_runner"
+        ),
         hitl_stage="plan",
         hitl_mode=str(hitl_mode),
         allow_raised_ideas=False,
@@ -89,6 +122,10 @@ def _render_planning_discussion_prompt(
         assigned_candidate_sha=assigned_candidate_sha,
         autoresearch_attempt=autoresearch_attempt,
         approved_proposal=approved_proposal,
+        candidate_planning=subject is None,
+        planning_task_background=(
+            subject["planning_context"] if subject is not None else ""
+        ),
         public_context=prompt_inputs["public_context"],
         whiteboard_active_tips_md=prompt_inputs["whiteboard_active_tips_md"],
         discussion_context=discussion_context,
@@ -101,6 +138,7 @@ def generate_planning_discussion_prompt(
     idea: Dict[str, Any],
     work_dir: Path,
     approved_proposal: str,
+    planning_subject: Optional[Mapping[str, Any]] = None,
     discussion_task_id: str,
     discussion_records: Sequence[Dict[str, Any]],
     assigned_candidate_sha: str,
@@ -112,16 +150,25 @@ def generate_planning_discussion_prompt(
     """Render one planning turn from public workspace and meeting context."""
 
     proposal = str(approved_proposal).strip()
-    if not proposal:
+    if planning_subject is None and not proposal:
         raise ValueError("Planning discussion requires the admitted proposal content")
-    prompt_inputs = _planning_discussion_prompt_inputs(
-        idea=idea,
-        work_dir=work_dir,
-        provider=provider,
-    )
+    if planning_subject is None:
+        prompt_inputs = _planning_discussion_prompt_inputs(
+            idea=idea,
+            work_dir=work_dir,
+            provider=provider,
+        )
+    else:
+        subject = _normalize_stage_planning_subject(planning_subject)
+        prompt_inputs = {
+            "public_context": dict(subject),
+            "whiteboard_active_tips_md": "",
+            "compute_backend_section": "",
+        }
     return _render_planning_discussion_prompt(
         idea=idea,
         approved_proposal=proposal,
+        planning_subject=planning_subject,
         discussion_task_id=discussion_task_id,
         discussion_context=render_planning_discussion_context(
             summary="",
@@ -148,6 +195,7 @@ def planning_discussion_prompt_template(
     idea: Dict[str, Any],
     work_dir: Path,
     approved_proposal: str,
+    planning_subject: Optional[Mapping[str, Any]] = None,
     discussion_task_id: str,
     assigned_candidate_sha: str,
     autoresearch_attempt: bool,
@@ -158,16 +206,25 @@ def planning_discussion_prompt_template(
     """Render one task with the exact runtime-owned context marker."""
 
     proposal = str(approved_proposal).strip()
-    if not proposal:
+    if planning_subject is None and not proposal:
         raise ValueError("Planning discussion requires the admitted proposal content")
-    prompt_inputs = _planning_discussion_prompt_inputs(
-        idea=idea,
-        work_dir=work_dir,
-        provider=provider,
-    )
+    if planning_subject is None:
+        prompt_inputs = _planning_discussion_prompt_inputs(
+            idea=idea,
+            work_dir=work_dir,
+            provider=provider,
+        )
+    else:
+        subject = _normalize_stage_planning_subject(planning_subject)
+        prompt_inputs = {
+            "public_context": dict(subject),
+            "whiteboard_active_tips_md": "",
+            "compute_backend_section": "",
+        }
     prompt = _render_planning_discussion_prompt(
         idea=idea,
         approved_proposal=proposal,
+        planning_subject=planning_subject,
         discussion_task_id=discussion_task_id,
         discussion_context=PLANNING_DISCUSSION_CONTEXT_MARKER,
         assigned_candidate_sha=assigned_candidate_sha,
@@ -190,6 +247,7 @@ def run_planning_discussion_task(
     idea: Dict[str, Any],
     work_dir: Path,
     approved_proposal: str,
+    planning_subject: Optional[Mapping[str, Any]] = None,
     discussion_task_id: str,
     discussion_records: Sequence[Dict[str, Any]],
     assigned_candidate_sha: str,
@@ -213,6 +271,7 @@ def run_planning_discussion_task(
             idea=idea,
             work_dir=work_dir,
             approved_proposal=approved_proposal,
+            planning_subject=planning_subject,
             discussion_task_id=discussion_task_id,
             discussion_records=discussion_records,
             assigned_candidate_sha=assigned_candidate_sha,
@@ -226,6 +285,7 @@ def run_planning_discussion_task(
             idea=idea,
             work_dir=work_dir,
             approved_proposal=approved_proposal,
+            planning_subject=planning_subject,
             discussion_task_id=discussion_task_id,
             assigned_candidate_sha=assigned_candidate_sha,
             autoresearch_attempt=autoresearch_attempt,
