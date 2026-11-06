@@ -30,6 +30,8 @@ from core.hitl_paths import (
 from core.hitl_planning_discussion import (
     planning_discussion_task_id,
     validate_planning_discussion_shape,
+    validate_planning_discussion_session_shape,
+    validate_stage_planning_discussion_shape,
 )
 from core.hitl_planning_mode import (
     COLLABORATIVE_PLANNING_MODE,
@@ -582,6 +584,40 @@ class HitlWorkspaceView:
             raise HitlWorkspaceViewError(
                 f"Invalid collaborative planning configuration: {exc}"
             ) from exc
+        shared_session = dict(session)
+        shared_session.pop("candidate_attempt_id")
+        shared_session.pop("admitted_proposal_idea_id")
+        return HitlWorkspaceView._planning_session_status(shared_session)
+
+    @staticmethod
+    def _stage_collaborative_planning_status(
+        runtime: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Derive progress for the one runtime-bound stage meeting."""
+
+        attachment = runtime.get("stage_planning_discussion")
+        if attachment is None:
+            return {}
+        try:
+            attachment = validate_stage_planning_discussion_shape(attachment)
+        except ValueError as exc:
+            raise HitlWorkspaceViewError(
+                f"Invalid stage collaborative planning configuration: {exc}"
+            ) from exc
+        status = HitlWorkspaceView._planning_session_status(attachment["session"])
+        status["planning_owner"] = dict(attachment["owner"])
+        return status
+
+    @staticmethod
+    def _planning_session_status(session: Dict[str, Any]) -> Dict[str, Any]:
+        """Project the shared planning session without assuming its state binding."""
+
+        try:
+            session = validate_planning_discussion_session_shape(session)
+        except ValueError as exc:
+            raise HitlWorkspaceViewError(
+                f"Invalid collaborative planning configuration: {exc}"
+            ) from exc
         tasks = session["tasks"]
         participant_count = int(session["participant_count"])
         maximum_rounds = int(session["max_response_rounds"])
@@ -730,9 +766,15 @@ class HitlWorkspaceView:
                 "Proposal preparation cannot contain ranked and collaborative state."
             )
         proposal_status = collaborative_proposal or ranked_proposal
-        planning_status = self._collaborative_planning_status(next_action)
+        candidate_planning_status = self._collaborative_planning_status(next_action)
+        stage_planning_status = self._stage_collaborative_planning_status(runtime)
+        if candidate_planning_status and stage_planning_status:
+            raise HitlWorkspaceViewError(
+                "Candidate and stage planning meetings cannot be active together."
+            )
+        planning_status = stage_planning_status or candidate_planning_status
         pending_planning_policy = next_action.get(PENDING_PLANNING_POLICY_FIELD)
-        if planning_status and pending_planning_policy is not None:
+        if candidate_planning_status and pending_planning_policy is not None:
             raise HitlWorkspaceViewError(
                 "Collaborative planning cannot retain pending policy after session creation."
             )
@@ -826,6 +868,8 @@ class HitlWorkspaceView:
             display_stage: Optional[str] = None,
             display_phase: Optional[str] = None,
             phase_started_at: Optional[str] = None,
+            workflow_stage: Optional[str] = None,
+            workflow_phase: Optional[str] = None,
         ) -> Dict[str, Any]:
             visible_stage = stage_label if display_stage is None else display_stage
             visible_phase = phase_label if display_phase is None else display_phase
@@ -838,9 +882,9 @@ class HitlWorkspaceView:
                 "can_construct_baseline": can_construct_baseline and not active,
                 "title": title,
                 "detail": detail,
-                "stage": stage,
+                "stage": stage if workflow_stage is None else workflow_stage,
                 "stage_label": visible_stage,
-                "phase": phase,
+                "phase": phase if workflow_phase is None else workflow_phase,
                 "phase_label": visible_phase,
                 "label": label,
                 "mode": mode,
@@ -907,8 +951,67 @@ class HitlWorkspaceView:
         continuation_status = str(continuation.get("status", "")).strip()
         proposal_display_status = proposal_status
         planning_display_status = planning_status
-        if (
-            planning_status.get("planning_discussion_phase") == "final_writing"
+        stage_planning_owner = (
+            dict(stage_planning_status.get("planning_owner") or {})
+            if stage_planning_status
+            else {}
+        )
+        stage_planning_stage = str(
+            stage_planning_owner.get("pipeline_stage", "")
+        ).strip()
+        planning_display_stage = (
+            self._stage_label(stage_planning_stage)
+            if stage_planning_stage
+            else "Experiment"
+        )
+        stage_planning_worker_after_plan = False
+        if stage_planning_status:
+            expected_provenance = (
+                {
+                    "parent_node_id": str(
+                        stage_planning_owner.get("parent_node_id", "")
+                    ).strip(),
+                    "attempt_id": str(
+                        stage_planning_owner.get("attempt_id", "")
+                    ).strip(),
+                    "additional_agent_ordinal": str(
+                        stage_planning_owner.get("additional_agent_ordinal", "")
+                    ).strip(),
+                }
+                if stage_planning_owner.get("kind") == "additional_agent"
+                else {}
+            )
+            continuation_after_plan = bool(
+                continuation.get("pipeline_stage") == stage_planning_stage
+                and continuation.get("actor") == stage_planning_stage
+                and continuation.get("hitl_stage") in {"execution", "review"}
+                and dict(continuation.get("provenance") or {})
+                == expected_provenance
+            )
+            pending_after_plan = bool(
+                active_pending.get("pipeline_stage") == stage_planning_stage
+                and active_pending.get("hitl_stage") in {"execution", "review"}
+                and dict(active_pending.get("provenance") or {})
+                == expected_provenance
+            )
+            stage_planning_worker_after_plan = bool(
+                continuation_after_plan or pending_after_plan
+            )
+            stage_completed = bool(
+                (pipeline.get("stages") or {})
+                .get(stage_planning_stage, {})
+                .get("status")
+                == "completed"
+            )
+            if (
+                stage_planning_status.get("planning_discussion_phase")
+                == "final_writing"
+                and (stage_planning_worker_after_plan or stage_completed)
+            ):
+                planning_display_status = {}
+        elif (
+            candidate_planning_status.get("planning_discussion_phase")
+            == "final_writing"
             and (unresolved or continuation_status)
         ):
             planning_display_status = {}
@@ -975,9 +1078,13 @@ class HitlWorkspaceView:
             if unresolved:
                 return pending_labels()
             if planning_display_status:
-                return "Experiment", str(planning_display_status["phase_label"])
+                return planning_display_stage, str(
+                    planning_display_status["phase_label"]
+                )
             if proposal_display_status:
                 return "Experiment", str(proposal_display_status["phase_label"])
+            if stage_planning_worker_after_plan:
+                return planning_display_stage, self._working_phase_label(phase)
             if action_status in {"pending", "decision_recorded"}:
                 kind = str(next_action.get("kind", "")).strip()
                 if kind == "prune_frontier":
@@ -1284,8 +1391,10 @@ class HitlWorkspaceView:
                 str(planning_display_status["detail"]),
                 next_step=str(planning_display_status["next_action"]),
                 record=next_action,
-                display_stage="Experiment",
+                display_stage=planning_display_stage,
                 display_phase=str(planning_display_status["phase_label"]),
+                workflow_stage=(stage_planning_stage or None),
+                workflow_phase=("plan" if stage_planning_stage else None),
             )
 
         if proposal_display_status:
@@ -1301,7 +1410,10 @@ class HitlWorkspaceView:
                 display_phase=str(proposal_display_status["phase_label"]),
             )
 
-        if action_status in {"pending", "decision_recorded"}:
+        if (
+            action_status in {"pending", "decision_recorded"}
+            and not stage_planning_worker_after_plan
+        ):
             action_stage, action_phase = durable_boundary_labels()
             preparing_proposal = next_action.get("kind") == "prepare_proposal"
             if action_status == "pending":
