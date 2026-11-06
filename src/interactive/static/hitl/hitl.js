@@ -964,7 +964,28 @@
     const rankedSetup = autoresearchSetup && proposalMode.value === "independent_ranked";
     const collaborativeSetup = autoresearchSetup && proposalMode.value === "collaborative";
     const collaborativePlanningSetup = autoresearchSetup && planningMode.value === "collaborative";
-    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), autoresearchSetup ? row("Proposals", proposalMode) : null, rankedSetup ? row("Proposers", proposerCount) : null, rankedSetup ? row("Reviewers", reviewerCount) : null, collaborativeSetup ? row("Participants (including lead)", participantCount) : null, collaborativeSetup ? row("Response rounds", discussionRounds) : null, autoresearchSetup ? row("Planning", planningMode) : null, collaborativePlanningSetup ? row("Planning participants (including lead)", planningParticipantCount) : null, collaborativePlanningSetup ? row("Planning response rounds", planningDiscussionRounds) : null, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
+    const participantsRow = (control) => {
+      const hintId = `${control.id}-hint`;
+      control.setAttribute("aria-describedby", hintId);
+      const field = row("Participants", control);
+      field.append(q("small", { id: hintId, class: "run-field-hint", text: "Includes the lead." }));
+      return field;
+    };
+    const proposals = autoresearchSetup ? q("fieldset", { class: "run-mode-group" }, [
+      q("legend", { text: "Proposals" }),
+      row("Mode", proposalMode),
+      rankedSetup ? row("Proposers", proposerCount) : null,
+      rankedSetup ? row("Reviewers", reviewerCount) : null,
+      collaborativeSetup ? participantsRow(participantCount) : null,
+      collaborativeSetup ? row("Discussion rounds", discussionRounds) : null,
+    ]) : null;
+    const planning = autoresearchSetup ? q("fieldset", { class: "run-mode-group" }, [
+      q("legend", { text: "Planning" }),
+      row("Mode", planningMode),
+      collaborativePlanningSetup ? participantsRow(planningParticipantCount) : null,
+      collaborativePlanningSetup ? row("Discussion rounds", planningDiscussionRounds) : null,
+    ]) : null;
+    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), proposals, planning, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
   }
   function conversation() {
     const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const request = state.snapshot?.inbox?.pending_request; const requestId = String(request?.conversation_record_id || "");
