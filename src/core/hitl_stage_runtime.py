@@ -137,14 +137,20 @@ class StagePlanningMeetingHandle:
         )
         return self._prompt_composer()(base_prompt)
 
-    def run_or_resume(self) -> Dict[str, Any]:
+    def run_or_resume(self, **owner_tool_options: Any) -> Dict[str, Any]:
         """Resume the shared coordinator at its authoritative durable phase."""
 
         session = self.state_binding.snapshot()
         if session.get("phase") == "reopen_pending":
-            raise RuntimeError(
-                "A pending planning reopen must settle before discussion resumes."
-            )
+            self.prepare_owner_tools(**owner_tool_options)
+            try:
+                reconciled = self.runtime.reconcile_planning_discussion_reopen()
+                transfer = self.runtime.prepare_planning_discussion_reopen_transfer(
+                    reconciled["reopen_record_id"]
+                )
+            finally:
+                self.runtime.clear_idea_tool_context()
+            return self.apply_reopen(transfer)
         return self.coordinator.run(session)
 
     def apply_reopen(self, transfer: Mapping[str, Any]) -> Dict[str, Any]:
@@ -285,6 +291,35 @@ def run_plan_centered_hitl_stage(
         "baseline_construction": baseline_construction,
         "baseline_candidate_manifest": baseline_candidate_manifest,
     }
+    if (
+        planning_meeting is not None
+        and planning_meeting.state_binding.snapshot().get("phase")
+        == "reopen_pending"
+    ):
+        planning_meeting.run_or_resume(
+            requires_human_approval=getattr(
+                runtime, "requires_human_plan_approval", True
+            ),
+            **stage_tool_options,
+        )
+        state = HitlRuntimeState(runtime.work_dir)
+        pending = state.pending_worker_command()
+        pending_response = (
+            pending.get("response") if isinstance(pending, dict) else None
+        )
+        continuation = state.worker_continuation() or {}
+        resume_approved_plan = bool(
+            isinstance(pending, dict)
+            and pending.get("kind") == "phase_finish"
+            and pending.get("hitl_stage") == "plan"
+            and pending.get("status") == "resolved"
+            and isinstance(pending_response, dict)
+            and pending_response.get("status") == "approved"
+            and continuation.get("hitl_stage") == "execution"
+        )
+        resume_pending = (
+            worker_command_requires_resume(pending) or resume_approved_plan
+        )
     if resume_pending:
         saved_phase = str(continuation.get("hitl_stage", "")).strip()
         if (
@@ -329,7 +364,12 @@ def run_plan_centered_hitl_stage(
         runtime.plan_has_human_approval,
     )():
         if planning_meeting is not None:
-            planning_meeting.run_or_resume()
+            planning_meeting.run_or_resume(
+                requires_human_approval=getattr(
+                    runtime, "requires_human_plan_approval", True
+                ),
+                **stage_tool_options,
+            )
             planning_meeting.prepare_owner_tools(
                 requires_human_approval=getattr(
                     runtime, "requires_human_plan_approval", True

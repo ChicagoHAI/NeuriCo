@@ -17,7 +17,7 @@ from core.research_environment import read_workspace_mode
 
 
 ResumeHook = Callable[
-    [Any, Callable[..., Dict[str, Any]], Dict[str, str], Callable[[], Dict[str, Any]]],
+    ...,
     Optional[tuple[Dict[str, Any], Dict[str, Any]]],
 ]
 
@@ -122,6 +122,7 @@ def run_resource_finder_hitl(
             launch_worker,
             worker_prompt_contexts,
             validate_outputs,
+            planning_meeting=planning_meeting,
         )
         if resumed is not None:
             result, finish = resumed

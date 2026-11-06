@@ -2207,6 +2207,192 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     and prepared_sha
                     and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
                 )
+    stage_planning_attachment = runtime_state.stage_planning_discussion_attachment()
+    stage_planning_present = stage_planning_attachment is not None
+    stage_planning_is_exact = False
+    stage_planning_phase: Optional[str] = None
+    stage_planning_approved_plan_handoff = False
+    if stage_planning_present and isinstance(preparation_action, dict):
+        try:
+            if (
+                ranked_round_present
+                or discussion_present
+                or planning_discussion_present
+            ):
+                raise RuntimeError(
+                    "Stage and candidate coordination cannot own one attempt together."
+                )
+            recovery = preparation_action.get("recovery")
+            if (
+                not isinstance(recovery, dict)
+                or recovery.get("stage") != "additional_agent"
+            ):
+                raise RuntimeError(
+                    "Stage planning meeting has no additional-agent recovery boundary."
+                )
+            HitlStageRollback.from_descriptor(work_dir, recovery)
+            expected_provenance = {
+                "parent_node_id": str(
+                    preparation_action.get("parent_node_sha", "")
+                ).strip(),
+                "attempt_id": str(preparation_action.get("attempt_id", "")).strip(),
+                "additional_agent_ordinal": str(
+                    preparation_action.get("additional_agent_ordinal", "")
+                ).strip(),
+            }
+            expected_owner = {
+                "kind": "additional_agent",
+                "pipeline_stage": "resource_finder",
+                "rollback_ref": str(recovery.get("hitl_snapshot_ref", "")).strip(),
+                "parent_node_id": expected_provenance["parent_node_id"],
+                "attempt_id": expected_provenance["attempt_id"],
+                "additional_agent_ordinal": int(
+                    preparation_action.get("additional_agent_ordinal", 0)
+                ),
+            }
+            if stage_planning_attachment.get("owner") != expected_owner:
+                raise RuntimeError(
+                    "Stage planning meeting belongs to another additional-agent invocation."
+                )
+            decision = preparation_action.get("decision")
+            if (
+                preparation_action.get("kind") != "prepare_proposal"
+                or not isinstance(decision, dict)
+                or decision.get("choice") != "call_additional_agent"
+                or decision.get("agent") != "resource_finder"
+            ):
+                raise RuntimeError(
+                    "Stage planning meeting has no owning resource-finder decision."
+                )
+            session = runtime_state.stage_planning_discussion_snapshot(
+                owner=expected_owner
+            )
+            stage_planning_phase = str(session.get("phase", "")).strip()
+            continuation = runtime_state.worker_continuation()
+            continuation_provenance = (
+                dict(continuation.get("provenance") or {})
+                if isinstance(continuation, dict)
+                else {}
+            )
+            request_provenance = (
+                dict(pending_request.get("provenance") or {})
+                if isinstance(pending_request, dict)
+                else {}
+            )
+
+            def terminal_request_precedes(boundary_started_at: Any) -> bool:
+                if pending_request is None:
+                    return True
+                if (
+                    not isinstance(pending_request, dict)
+                    or worker_command_requires_resume(pending_request)
+                ):
+                    return False
+                created_at = str(pending_request.get("created_at", "")).strip()
+                started_at = str(boundary_started_at or "").strip()
+                return bool(
+                    pending_request.get("status") in {"resolved", "cancelled"}
+                    and created_at
+                    and started_at
+                    and created_at < started_at
+                )
+
+            matching_plan_continuation = bool(
+                isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("hitl_stage") == "plan"
+                and continuation.get("actor") == "resource_finder"
+                and continuation_provenance == expected_provenance
+                and str(continuation.get("prompt_block", "")).strip()
+            )
+            matching_pending_request = bool(
+                isinstance(pending_request, dict)
+                and pending_request.get("pipeline_stage") == "resource_finder"
+                and pending_request.get("kind") in {"phase_finish", "raised_idea"}
+                and request_provenance == expected_provenance
+                and worker_command_requires_resume(pending_request)
+            )
+            response = (
+                pending_request.get("response")
+                if isinstance(pending_request, dict)
+                else None
+            )
+            stage_planning_approved_plan_handoff = bool(
+                isinstance(pending_request, dict)
+                and pending_request.get("pipeline_stage") == "resource_finder"
+                and pending_request.get("kind") == "phase_finish"
+                and pending_request.get("hitl_stage") == "plan"
+                and pending_request.get("status") == "resolved"
+                and isinstance(response, dict)
+                and response.get("status") == "approved"
+                and not bool(response.get("final"))
+                and isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("hitl_stage") == "execution"
+                and continuation.get("actor") == "resource_finder"
+                and request_provenance == expected_provenance
+                and continuation_provenance == expected_provenance
+                and str(continuation.get("prompt_block", "")).strip()
+            )
+            if stage_planning_phase in {
+                "initial",
+                "opening",
+                "response",
+                "decision",
+            }:
+                stage_planning_is_exact = bool(
+                    terminal_request_precedes(
+                        preparation_action.get("created_at")
+                    )
+                    and str(session.get("workspace_fingerprint", "")).strip()
+                    == HitlWorkspaceWriteGuard.public_fingerprint(
+                        work_dir,
+                        scope=session.get("workspace_fingerprint_scope"),
+                    )
+                )
+            elif stage_planning_phase == "reopen_pending":
+                reopen = runtime_state.bind_stage_planning_discussion(
+                    owner=expected_owner
+                ).reopen_recovery_snapshot()
+                handoff = reopen.get("handoff")
+                stage_planning_is_exact = bool(
+                    isinstance(handoff, dict)
+                    and str(handoff.get("workspace_fingerprint", "")).strip()
+                    == HitlWorkspaceWriteGuard.public_fingerprint(
+                        work_dir,
+                        scope=handoff.get("workspace_fingerprint_scope"),
+                    )
+                )
+            elif stage_planning_phase == "final_writing":
+                if stage_planning_approved_plan_handoff:
+                    stage_planning_is_exact = True
+                elif matching_plan_continuation:
+                    stage_planning_is_exact = bool(
+                        pending_request is None
+                        or matching_pending_request
+                        or terminal_request_precedes(
+                            continuation.get("started_at")
+                        )
+                    )
+                elif continuation is None:
+                    stage_planning_is_exact = bool(
+                        terminal_request_precedes(
+                            preparation_action.get("created_at")
+                        )
+                        and str(session.get("workspace_fingerprint", "")).strip()
+                        == HitlWorkspaceWriteGuard.public_fingerprint(
+                            work_dir,
+                            scope=session.get("workspace_fingerprint_scope"),
+                        )
+                    )
+        except (
+            HitlRuntimeStateError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            stage_planning_is_exact = False
     coordination_present = bool(
         ranked_round_present or discussion_present or planning_discussion_present
     )
@@ -2260,6 +2446,13 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                 and planning_discussion_phase == "final_writing"
             )
         )
+        and (
+            not stage_planning_present
+            or (
+                stage_planning_is_exact
+                and stage_planning_phase == "final_writing"
+            )
+        )
     )
     preparation_metadata_is_exact = (
         isinstance(preparation_action, dict)
@@ -2301,9 +2494,9 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         else {}
     )
     dynamic_agent_request = (
-        not coordination_present
-        and isinstance(pending_request, dict)
+        isinstance(pending_request, dict)
         and pending_request.get("pipeline_stage") == "resource_finder"
+        and (stage_planning_present or not coordination_present)
     )
     dynamic_agent_matches_attempt = (
         dynamic_agent_request
@@ -2367,6 +2560,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and worker_command_requires_resume(pending_request)
         and isinstance(continuation, dict)
         and pending_provenance == continuation_provenance
+        and (not stage_planning_present or stage_planning_is_exact)
     )
     pending_response = (
         pending_request.get("response") if isinstance(pending_request, dict) else None
@@ -2423,7 +2617,11 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             scope=pending_request.get("workspace_fingerprint_scope"),
         )
     )
-    if planning_discussion_present and planning_discussion_phase in {
+    if stage_planning_present:
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact and stage_planning_is_exact
+        )
+    elif planning_discussion_present and planning_discussion_phase in {
         "final_writing", "reopen_pending"
     }:
         # Preparation's rollback descriptor is retired before planning starts.
@@ -2509,6 +2707,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and (
             worker_command_requires_resume(pending_request)
             or planning_approved_plan_handoff
+            or stage_planning_approved_plan_handoff
         )
         and isinstance(continuation, dict)
         and planning_worker_recovery_is_exact
@@ -2516,7 +2715,11 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and str(continuation_provenance.get("attempt_id", "")).strip() == attempt_dir.name
         and str(continuation_provenance.get("parent_node_id", "")).strip()
         == current_best_sha
-        and (not dynamic_agent_request or resumable_agent_request)
+        and (
+            not dynamic_agent_request
+            or resumable_agent_request
+            or stage_planning_approved_plan_handoff
+        )
         and (
             not (discussion_present or planning_discussion_present)
             or str(continuation.get("hitl_stage", "")).strip()
