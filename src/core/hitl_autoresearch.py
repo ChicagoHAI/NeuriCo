@@ -2314,10 +2314,47 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                 and request_provenance == expected_provenance
                 and worker_command_requires_resume(pending_request)
             )
+            matching_post_plan_continuation = bool(
+                isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("hitl_stage") in {"execution", "review"}
+                and continuation.get("actor") == "resource_finder"
+                and continuation_provenance == expected_provenance
+                and str(continuation.get("prompt_block", "")).strip()
+            )
+            matching_post_plan_pending_request = bool(
+                matching_post_plan_continuation
+                and isinstance(pending_request, dict)
+                and pending_request.get("pipeline_stage") == "resource_finder"
+                and pending_request.get("kind") in {"phase_finish", "raised_idea"}
+                and request_provenance == expected_provenance
+                and str(pending_request.get("request_key", "")).strip()
+                and worker_command_requires_resume(pending_request)
+                and (
+                    pending_request.get("status") == "resolved"
+                    or pending_request.get("hitl_stage")
+                    == continuation.get("hitl_stage")
+                )
+            )
             response = (
                 pending_request.get("response")
                 if isinstance(pending_request, dict)
                 else None
+            )
+            matching_approved_post_plan_request = bool(
+                isinstance(pending_request, dict)
+                and pending_request.get("pipeline_stage") == "resource_finder"
+                and pending_request.get("kind") == "phase_finish"
+                and pending_request.get("hitl_stage") in {"execution", "review"}
+                and pending_request.get("status") == "resolved"
+                and request_provenance == expected_provenance
+                and isinstance(response, dict)
+                and response.get("status") == "approved"
+                and str(pending_request.get("workspace_fingerprint", "")).strip()
+                == HitlWorkspaceWriteGuard.public_fingerprint(
+                    work_dir,
+                    scope=pending_request.get("workspace_fingerprint_scope"),
+                )
             )
             stage_planning_approved_plan_handoff = bool(
                 isinstance(pending_request, dict)
@@ -2376,6 +2413,10 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                             continuation.get("started_at")
                         )
                     )
+                elif matching_post_plan_pending_request:
+                    stage_planning_is_exact = True
+                elif matching_approved_post_plan_request:
+                    stage_planning_is_exact = True
                 elif continuation is None:
                     stage_planning_is_exact = bool(
                         terminal_request_precedes(
