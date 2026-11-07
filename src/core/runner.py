@@ -480,10 +480,10 @@ class ResearchRunner:
         if focused_autoresearch is not None and type(focused_autoresearch) is not bool:
             raise TypeError("focused_autoresearch must be a Boolean when supplied.")
         if focused_autoresearch is not None and not (
-            hitl_autoresearch or hitl_continue_autoresearch
+            hitl_research or hitl_autoresearch or hitl_continue_autoresearch
         ):
             raise ValueError(
-                "Focused AutoResearch is valid only for managed HITL AutoResearch."
+                "Focused mode is valid only for managed Ordinary research or HITL AutoResearch."
             )
         hitl = (
             hitl_research
@@ -903,6 +903,7 @@ class ResearchRunner:
                 work_dir=work_dir,
                 managed_initial_run=True,
                 hitl_mode=selected_hitl_mode,
+                focused_autoresearch=focused_autoresearch,
             ).prepare_initial_resume()
         elif hitl and (autoresearch or continue_autoresearch):
             from core.hitl_autoresearch import (
@@ -1257,6 +1258,9 @@ class ResearchRunner:
                 hitl_manager_config=hitl_host.manager.config if hitl_host else None,
                 managed_initial_run=bool(hitl_research),
                 hitl_mode=selected_hitl_mode,
+                focused_autoresearch=(
+                    focused_autoresearch if hitl_research else None
+                ),
             )
             success = False
             hitl_stop_requested = False
@@ -2258,7 +2262,10 @@ def main():
     parser.add_argument(
         "--focused-autoresearch",
         action="store_true",
-        help="Investigate one selected direction at a time in fresh HITL AutoResearch.",
+        help=(
+            "Concentrate managed Ordinary research on the best final solution, or "
+            "investigate one selected direction in fresh HITL AutoResearch."
+        ),
     )
     parser.add_argument(
         "--auto",
@@ -2292,8 +2299,12 @@ def main():
     ]
     if len(autoresearch_modes) > 1:
         parser.error("Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes))
-    if args.focused_autoresearch and not args.hitl_autoresearch:
-        parser.error("--focused-autoresearch requires --hitl-autoresearch.")
+    if args.focused_autoresearch and not (
+        args.hitl_research or args.hitl_autoresearch
+    ):
+        parser.error(
+            "--focused-autoresearch requires --hitl-research or --hitl-autoresearch."
+        )
     # A timeout of 0 disables that stage's wall-clock limit.
     for name in ("timeout", "resource_finder_timeout", "paper_timeout"):
         if getattr(args, name) is not None and getattr(args, name) <= 0:

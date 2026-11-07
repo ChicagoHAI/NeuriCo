@@ -36,6 +36,7 @@ def generate_resource_finder_prompt(
     objective: str = "",
     invocation_mode: str = "bootstrap",
     focused_autoresearch: bool = False,
+    focused_managed_ordinary: bool = False,
 ) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
@@ -72,6 +73,7 @@ def generate_resource_finder_prompt(
         objective=objective,
         invocation_mode=invocation_mode,
         focused_autoresearch=focused_autoresearch,
+        focused_managed_ordinary=focused_managed_ordinary,
     )
 
 
