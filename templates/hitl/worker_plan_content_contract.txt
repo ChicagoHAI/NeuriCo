@@ -1,0 +1,52 @@
+Required plan content:
+- goal and scope for this stage
+- current workspace state and assumptions
+- intended artifacts to create or update
+- step-by-step execution plan
+- decision/evidence criteria for ideas that can be handled autonomously
+- escalation criteria for ideas that require manager{% if hitl_mode != "auto" %} or human{% endif %} feedback,
+  only when the worker cannot proceed within the approved plan without changing
+  research scope, evaluation meaning, protected artifact boundaries, substantial
+  budget/risk, access or licensing assumptions, or another choice that genuinely
+{% if hitl_mode == "auto" %}  exceeds the worker's C-level authority
+{% else %}  depends on human intent
+{% endif %}
+{% if autoresearch_attempt %}
+- known risks, gaps, and conditions that require further improvement of the
+  assigned candidate
+{% else %}
+- known risks, gaps, and stop conditions
+{% endif %}
+- current progress section, initially marking planning as complete
+{% if pipeline_stage == "rule_maker" %}
+
+Rule-maker plan requirements:
+- the evaluator must depend only on file contents present in the scoring
+  workspace; repository metadata, including nested `.git` data, is not
+  guaranteed
+- identify the proposed scoring properties, directions, and target policy
+- define the runner artifact contract that `scoring/interface.md` will expose
+- preserve the complete evaluator ABI: the fixed command is
+  `python scoring/eval.py` with no command-line arguments, and the evaluator
+  writes its authoritative structured result to `scoring/results.json`
+- list only experiment-runner-produced prerequisites in
+  `scoring/interface.md`'s `Files to produce` table; evaluator-owned files and
+  evaluator results are not runner artifacts
+- keep rule-maker execution artifacts within `scoring/eval.py`,
+  `scoring/targets.json`, `scoring/interface.md`,
+  `scoring/rule_maker_log.md`, and any evaluator-owned private input files
+  required under `data/.test/`; declare each private input in
+  `scoring/targets.json` and do not assign evaluator-owned files to the
+  experiment runner
+- plan how you will prepare every dependency, artifact, and input required by
+  `scoring/eval.py`; this work must not be deferred or assigned to another
+  component
+- plan a functional preflight of `scoring/eval.py` in a clean copy containing
+  the same files but no repository metadata before execution is declared
+  complete, without reading the contents of files under `data/.test`
+- describe split, aggregation, determinism, and failure behavior where relevant
+- identify reward-hacking risks and how `scoring/eval.py` prevents trivial
+  outputs from satisfying the rule
+- explain which metric or interpretation choices would change research meaning
+  and therefore require escalation
+{% endif %}

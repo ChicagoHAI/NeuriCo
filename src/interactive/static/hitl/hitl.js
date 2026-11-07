@@ -14,7 +14,7 @@
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
     managerStatusSeq: -1,
-    runDraft: { operation: "research", workflow: "autoresearch", focusedAutoresearch: false, hitlMode: "auto", proposalMode: "single", proposerCount: 3, reviewerCount: 3, participantCount: 5, discussionRounds: 3, iterations: 2, timeLimitSeconds: "", writePaper: true, paperStyle: "auto", github: false },
+    runDraft: { operation: "research", workflow: "autoresearch", focusedAutoresearch: false, hitlMode: "auto", proposalMode: "single", proposerCount: 3, reviewerCount: 3, participantCount: 5, discussionRounds: 3, planningMode: "single", planningParticipantCount: 5, planningDiscussionRounds: 3, iterations: 2, timeLimitSeconds: "", writePaper: true, paperStyle: "auto", github: false },
     portal: null, ideas: [], selectedIdeaId: initialIdeaId, catalogBusy: false,
     creatingIdea: false, ideaSchema: null, ideaDraft: {}, ideaSubmitError: "",
     renamingIdeaId: "", draggedIdeaId: "",
@@ -870,6 +870,9 @@
     const reviewerCount = q("input", { id: "run-reviewer-count", type: "number", min: "2", max: "9", step: "1", required: "required", value: state.runDraft.reviewerCount, "data-focus-key": "run-reviewer-count" }); reviewerCount.oninput = () => { state.runDraft.reviewerCount = reviewerCount.value; reviewerCount.setCustomValidity(""); };
     const participantCount = q("input", { id: "run-participant-count", type: "number", min: "3", max: "10", step: "1", required: "required", value: state.runDraft.participantCount, "data-focus-key": "run-participant-count" }); participantCount.oninput = () => { state.runDraft.participantCount = participantCount.value; participantCount.setCustomValidity(""); };
     const discussionRounds = q("input", { id: "run-discussion-rounds", type: "number", min: "1", max: "10", step: "1", required: "required", value: state.runDraft.discussionRounds, "data-focus-key": "run-discussion-rounds" }); discussionRounds.oninput = () => { state.runDraft.discussionRounds = discussionRounds.value; discussionRounds.setCustomValidity(""); };
+    const planningMode = q("select", { id: "run-planning-mode", "data-focus-key": "run-planning-mode" }); [["single", "Single"], ["collaborative", "Collaborative"]].forEach(([value, label]) => planningMode.append(q("option", { value, text: label }))); planningMode.value = state.runDraft.planningMode; planningMode.onchange = () => { state.runDraft.planningMode = planningMode.value; render({ preserveScroll: true }); };
+    const planningParticipantCount = q("input", { id: "run-planning-participant-count", type: "number", min: "3", max: "10", step: "1", required: "required", value: state.runDraft.planningParticipantCount, "data-focus-key": "run-planning-participant-count" }); planningParticipantCount.oninput = () => { state.runDraft.planningParticipantCount = planningParticipantCount.value; planningParticipantCount.setCustomValidity(""); };
+    const planningDiscussionRounds = q("input", { id: "run-planning-discussion-rounds", type: "number", min: "1", max: "10", step: "1", required: "required", value: state.runDraft.planningDiscussionRounds, "data-focus-key": "run-planning-discussion-rounds" }); planningDiscussionRounds.oninput = () => { state.runDraft.planningDiscussionRounds = planningDiscussionRounds.value; planningDiscussionRounds.setCustomValidity(""); };
     const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", step: "1", required: "required", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; iterations.setCustomValidity(""); };
     const timeLimit = q("input", { id: "run-time-limit", type: "number", min: "1", step: "1", placeholder: "sec", title: "Time budget in seconds. Leave blank for no time limit.", "aria-label": "Time budget in seconds (optional)", value: state.runDraft.timeLimitSeconds, "data-focus-key": "run-time-limit" }); timeLimit.oninput = () => { state.runDraft.timeLimitSeconds = timeLimit.value; timeLimit.setCustomValidity(""); };
     const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };
@@ -928,6 +931,25 @@
           payload.participant_count = participantValue;
           payload.discussion_rounds = roundValue;
         }
+        payload.planning_mode = planningMode.value;
+        if (planningMode.value === "collaborative") {
+          const planningParticipantValue = Number(planningParticipantCount.value);
+          if (!planningParticipantCount.value.trim() || !Number.isInteger(planningParticipantValue) || planningParticipantValue < 3 || planningParticipantValue > 10) {
+            planningParticipantCount.setCustomValidity("Enter a whole number from 3 to 10.");
+            planningParticipantCount.reportValidity();
+            planningParticipantCount.focus();
+            return;
+          }
+          const planningRoundValue = Number(planningDiscussionRounds.value);
+          if (!planningDiscussionRounds.value.trim() || !Number.isInteger(planningRoundValue) || planningRoundValue < 1 || planningRoundValue > 10) {
+            planningDiscussionRounds.setCustomValidity("Enter a whole number from 1 to 10.");
+            planningDiscussionRounds.reportValidity();
+            planningDiscussionRounds.focus();
+            return;
+          }
+          payload.planning_participant_count = planningParticipantValue;
+          payload.planning_discussion_rounds = planningRoundValue;
+        }
         const duration = timeLimit.value.trim() ? Number(timeLimit.value) : null;
         if (timeLimit.validity.badInput || (duration !== null && (!Number.isSafeInteger(duration) || duration <= 0))) {
           timeLimit.setCustomValidity("Enter a positive whole number of seconds, or leave blank for no limit.");
@@ -944,7 +966,19 @@
     const autoresearchSetup = !constructingBaseline && workflow.value === "autoresearch";
     const rankedSetup = autoresearchSetup && proposalMode.value === "independent_ranked";
     const collaborativeSetup = autoresearchSetup && proposalMode.value === "collaborative";
-    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), autoresearchSetup ? q("label", { class: "check-row" }, [focused, q("span", { text: "Focused mode" })]) : null, autoresearchSetup ? row("Proposals", proposalMode) : null, rankedSetup ? row("Proposers", proposerCount) : null, rankedSetup ? row("Reviewers", reviewerCount) : null, collaborativeSetup ? row("Participants (including lead)", participantCount) : null, collaborativeSetup ? row("Response rounds", discussionRounds) : null, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
+    const collaborativePlanningSetup = autoresearchSetup && planningMode.value === "collaborative";
+    const proposals = autoresearchSetup ? q("fieldset", { class: "run-mode-group" }, [
+      q("legend", {}, [q("label", { for: proposalMode.id, text: "Proposals" })]),
+      proposalMode,
+      rankedSetup ? q("div", { class: "run-counts" }, [row("Proposers", proposerCount), row("Reviewers", reviewerCount)]) : null,
+      collaborativeSetup ? q("div", { class: "run-counts" }, [row("Team size", participantCount), row("Rounds", discussionRounds)]) : null,
+    ]) : null;
+    const planning = autoresearchSetup ? q("fieldset", { class: "run-mode-group" }, [
+      q("legend", {}, [q("label", { for: planningMode.id, text: "Planning" })]),
+      planningMode,
+      collaborativePlanningSetup ? q("div", { class: "run-counts" }, [row("Team size", planningParticipantCount), row("Rounds", planningDiscussionRounds)]) : null,
+    ]) : null;
+    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), autoresearchSetup ? q("label", { class: "check-row" }, [focused, q("span", { text: "Focused mode" })]) : null, proposals, planning, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
   }
   function conversation() {
     const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const request = state.snapshot?.inbox?.pending_request; const requestId = String(request?.conversation_record_id || "");
