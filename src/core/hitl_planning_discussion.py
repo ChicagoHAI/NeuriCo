@@ -1753,7 +1753,7 @@ def prepare_planning_discussion_prompt(
                 source_record_ids=source_ids,
                 original_records=originals,
                 pipeline_stage=str(
-                    public_background.get("pipeline_stage", "")
+                    public_background.get("pipeline_stage", "experiment_runner")
                 ).strip(),
                 allow_reopen=allow_reopen,
                 reopen_source_ideas=reopen_source_ideas,

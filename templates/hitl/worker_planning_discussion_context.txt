@@ -37,6 +37,13 @@ recommendation is within scope. Identify unsupported implementation
 restrictions rather than carrying them forward as requirements.
 
 {% endif %}
+{% if pipeline_stage == "experiment_runner" %}
+Official evaluation is outside the experiment runner's responsibility.
+Do not include requesting or performing it in the execution plan, or make
+evaluator availability or official results a prerequisite for completing
+the worker's tasks.
+
+{% endif %}
 {% if allow_reopen %}
 If plan review returns feedback, decide before editing the reviewed plan whether
 that feedback needs another group response round. You may revise directly or

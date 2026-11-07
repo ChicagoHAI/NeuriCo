@@ -178,7 +178,9 @@ def generate_planning_discussion_prompt(
             summary="",
             source_record_ids=(),
             original_records=discussion_records,
-            pipeline_stage=(subject["pipeline_stage"] if subject is not None else ""),
+            pipeline_stage=(
+                subject["pipeline_stage"] if subject is not None else "experiment_runner"
+            ),
         ),
         assigned_candidate_sha=assigned_candidate_sha,
         autoresearch_attempt=autoresearch_attempt,
