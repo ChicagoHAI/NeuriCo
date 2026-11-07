@@ -368,14 +368,27 @@ def initial_publication_requires_resume(work_dir: Path) -> bool:
     return isinstance(transition, dict) and transition.get("status") != "completed"
 
 
-def prepare_initial_hitl_resume(work_dir: Path) -> bool:
+def prepare_initial_hitl_resume(
+    work_dir: Path,
+    *,
+    focused_autoresearch: Optional[bool] = None,
+) -> bool:
     """Restore initial state before a manager or new worker can act on it."""
-    from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+    from core.pipeline_orchestrator import PipelineState, ResearchPipelineOrchestrator
 
     if initial_publication_requires_resume(work_dir):
+        if focused_autoresearch is not None and (
+            PipelineState.read_focused_autoresearch(work_dir)
+            != focused_autoresearch
+        ):
+            raise RuntimeError(
+                "This workspace already has a different focused AutoResearch setting."
+            )
         return True
     return ResearchPipelineOrchestrator(
-        work_dir=work_dir, hitl_autoresearch=True,
+        work_dir=work_dir,
+        hitl_autoresearch=True,
+        focused_autoresearch=focused_autoresearch,
     ).prepare_initial_resume()
 
 
@@ -400,11 +413,21 @@ def run_fresh_hitl_autoresearch_initial_node(
     manager_config: Optional[Dict[str, Any]] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
     planning_mode_config: Optional[PlanningModeConfig] = None,
+    focused_autoresearch: Optional[bool] = None,
 ) -> InitialAutoResearchNodeResult:
     """Run the initial scored experiment through the HITL pipeline."""
-    from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+    from core.pipeline_orchestrator import PipelineState, ResearchPipelineOrchestrator
 
     work_dir = Path(work_dir)
+    if (
+        (work_dir / ".neurico" / "pipeline_state.json").is_file()
+        and focused_autoresearch is not None
+        and PipelineState.read_focused_autoresearch(work_dir)
+        != focused_autoresearch
+    ):
+        raise RuntimeError(
+            "This workspace already has a different focused AutoResearch setting."
+        )
     selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     existing_publication = (
         HitlRuntimeState(work_dir).initial_root_publication_transition()
@@ -433,6 +456,7 @@ def run_fresh_hitl_autoresearch_initial_node(
         hitl_autoresearch=True,
         hitl_mode=selected_hitl_mode,
         planning_mode_config=planning_mode_config,
+        focused_autoresearch=focused_autoresearch,
     ).run_pipeline(
         idea=idea,
         provider=provider,

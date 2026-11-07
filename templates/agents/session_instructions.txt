@@ -225,14 +225,23 @@ BEFORE YOU START: Review Pre-Gathered Resources (5-10 min)
   → WHEN COMPLETE: Immediately proceed to Phase 1 (Planning)
 
 Phase 1: Motivation & Planning (20-40 min)
-  ✓ FIRST: Write "Motivation & Novelty Assessment" section in planning.md
+{% if focused_autoresearch %}  ✓ FIRST: Write "Motivation & Approach Rationale" section in planning.md
+    - Why this research matters (problem and impact)
+    - What evidence supports the selected direction and what assumptions
+      or limitations need investigation
+    - Why each experiment is necessary{% else %}  ✓ FIRST: Write "Motivation & Novelty Assessment" section in planning.md
     - Why this research matters (problem and impact)
     - What gap it fills (based on literature review)
-    - Why each experiment is necessary
+    - Why each experiment is necessary{% endif %}
+
   ✓ Review pre-gathered resources (literature_review.md, resources.md)
   ✓ Create experimental plan leveraging available datasets and code
   ✓ Design experiments with specific steps (justify each experiment)
-  ✓ Choose baselines and metrics based on literature review
+{% if focused_autoresearch %}  ✓ Use the evaluation requirements in scoring/interface.md. Include
+    baseline work in the plan only when needed to evaluate the selected direction
+    or when explicitly required by the user. Reuse an existing baseline
+    where available.{% else %}  ✓ Choose baselines and metrics based on literature review{% endif %}
+
   ✓ Plan timeline and resource allocation
   ✓ Document plan in planning.md (2-3 pages maximum)
 
@@ -251,7 +260,10 @@ Phase 2: Environment & Data Setup (10-20 min)
 Phase 3: Implementation (60-90 min)
   {{ code_workflow }}
   ✓ Leverage code from code/ directory where applicable
-  ✓ Implement baselines first (use/adapt existing implementations)
+{% if focused_autoresearch %}  ✓ Implement a baseline only when needed to evaluate the selected direction
+    or when explicitly required by the user. Reuse an existing baseline
+    where available.{% else %}  ✓ Implement baselines first (use/adapt existing implementations){% endif %}
+
   ✓ Implement proposed method
   ✓ Create evaluation harness
   ✓ Write clean, documented code with comments and docstrings
@@ -260,19 +272,26 @@ Phase 3: Implementation (60-90 min)
   → WHEN COMPLETE: Immediately proceed to Phase 4 (Experiments)
 
 Phase 4: Experimentation (60-90 min)
-  ✓ Run baseline experiments
+{% if focused_autoresearch %}  ✓ Run baseline experiments only when needed to evaluate the selected
+    direction or when explicitly required by the user. Reuse existing
+    results when they remain valid for the comparison.{% else %}  ✓ Run baseline experiments{% endif %}
+
   ✓ Run proposed method experiments
   ✓ Collect results systematically (save to results/ directory)
-  ✓ Generate visualizations
+{% if focused_autoresearch %}  ✓ Generate visualizations when they help interpret results or diagnose problems.{% else %}  ✓ Generate visualizations{% endif %}
+
   ✓ Monitor for issues
 
   → WHEN COMPLETE: Immediately proceed to Phase 5 (Analysis)
 
 Phase 5: Analysis (30-45 min)
   ✓ Analyze results statistically
-  ✓ Compare against baselines and literature
+{% if focused_autoresearch %}  ✓ Consult existing results or literature when they help identify
+    weaknesses or guide improvements to the selected direction.{% else %}  ✓ Compare against baselines and literature{% endif %}
+
   ✓ Perform error analysis
-  ✓ Create comprehensive visualizations
+{% if focused_autoresearch %}  ✓ Create visualizations when they help interpret results or diagnose problems.{% else %}  ✓ Create comprehensive visualizations{% endif %}
+
   ✓ Document findings incrementally
 
   → WHEN COMPLETE: Immediately proceed to Phase 6 (Documentation)
@@ -337,10 +356,13 @@ PHASE 6 REQUIREMENTS - WHAT TO INCLUDE IN FINAL DOCUMENTATION
 
 When you reach Phase 6, create these files with ACTUAL results from your experiments:
 
-1. REPORT.md - Comprehensive research report containing:
+{% if focused_autoresearch %}1. REPORT.md - Comprehensive technical record of the selected directions, containing:{% else %}1. REPORT.md - Comprehensive research report containing:{% endif %}
+
    - Executive Summary (2-3 paragraphs summarizing what you found)
    - Research Question & Hypothesis
-   - Literature Review Summary (key papers and insights from Phase 0)
+{% if focused_autoresearch %}   - Literature Review Summary (key papers and insights that informed the
+     selected directions){% else %}   - Literature Review Summary (key papers and insights from Phase 0){% endif %}
+
    - Methodology (what you actually did, step-by-step)
      * Datasets/baselines you used and why
      * Evaluation metrics and justification
@@ -352,7 +374,9 @@ When you reach Phase 6, create these files with ACTUAL results from your experim
    - Conclusion
    - References (papers, datasets, tools used)
 
-   Include key visualizations/tables inline (as markdown).
+{% if focused_autoresearch %}   Include figures or tables inline (as markdown) when they help explain
+   the findings.{% else %}   Include key visualizations/tables inline (as markdown).{% endif %}
+
 
 2. README.md - Quick overview containing:
    - Brief project description (2-3 sentences)

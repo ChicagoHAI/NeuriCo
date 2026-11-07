@@ -63,6 +63,7 @@ def run_resource_finder_hitl(
     on_failed: Callable[[Dict[str, Any]], Dict[str, Any]],
     objective: str = "",
     invocation_mode: str = "bootstrap",
+    focused_autoresearch: bool = False,
     provenance: Optional[Dict[str, Any]] = None,
     resume_worker: Optional[ResumeHook] = None,
     force_fresh_plan: bool = False,
@@ -88,6 +89,7 @@ def run_resource_finder_hitl(
             hitl_phase=phase,
             objective=objective,
             invocation_mode=invocation_mode,
+            focused_autoresearch=focused_autoresearch,
         )
         for phase in ("plan", "execution", "review")
     }
@@ -125,6 +127,7 @@ def run_resource_finder_hitl(
                 hitl_phase="discussion",
                 objective=objective,
                 invocation_mode=invocation_mode,
+                focused_autoresearch=focused_autoresearch,
             )
 
             def planning_factory() -> StagePlanningMeetingHandle:

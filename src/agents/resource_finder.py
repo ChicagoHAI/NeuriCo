@@ -35,6 +35,7 @@ def generate_resource_finder_prompt(
     scoring_enabled: bool = False,
     objective: str = "",
     invocation_mode: str = "bootstrap",
+    focused_autoresearch: bool = False,
 ) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
@@ -70,6 +71,7 @@ def generate_resource_finder_prompt(
         scoring_enabled=scoring_enabled,
         objective=objective,
         invocation_mode=invocation_mode,
+        focused_autoresearch=focused_autoresearch,
     )
 
 

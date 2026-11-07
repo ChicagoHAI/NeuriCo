@@ -33,6 +33,17 @@ run experiments, analyze results, and document the work.
 | **Domain-Agnostic** | Supports ML, data science, AI, systems, theory, and more |
 | **Smart Documentation** | Produces reports, code, results, and optional papers |
 | **GitHub Integration** | Optionally creates repositories and pushes results |
+| **Harbor Agent** | Runs Harbor instructions through NeuriCo's existing AutoResearch workflow using a locked ACP adapter |
+
+### Harbor agent integration
+
+The experimental, benchmark-focused Harbor adapter converts Harbor's
+instruction through the existing local-idea path and runs fresh AutoResearch
+in Harbor's supplied workspace. NeuriCo constructs a scored baseline, proposes
+improvements, scores candidates, and retains the best checkpoint; paper
+generation is disabled. See
+[`integrations/harbor/README.md`](integrations/harbor/README.md) for the hosted
+manifest, credential contract, and local protocol test.
 
 ## Requirements
 

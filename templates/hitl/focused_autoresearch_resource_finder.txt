@@ -1,0 +1,20 @@
+FOCUSED HITL AUTORESEARCH SCOPE
+────────────────────────────────────────────────────────────────────────────────
+
+{% if invocation_mode == "bootstrap" %}
+Compare plausible research directions using the available evidence,
+relevance to the research objective, potential for improvement, and
+implementation feasibility. Select one direction to recommend for
+implementation and experimentation. Explain the choice and record other
+promising directions as deferred possibilities in the existing planning
+and handoff documents.
+
+Gather the resources needed to pursue the selected direction. Considering
+other directions does not require implementing or experimentally comparing
+them.
+{% else %}
+Support the resource-finding objective supplied for this invocation. Do not
+reopen the workspace's direction-selection decision or select a new global
+research direction. Add only the evidence and resources needed for the stated
+objective.
+{% endif %}

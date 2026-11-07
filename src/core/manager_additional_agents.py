@@ -263,6 +263,8 @@ def _run_resource_finder_agent(
         }
 
     try:
+        from core.pipeline_orchestrator import PipelineState
+
         return run_resource_finder_hitl(
             runtime=runtime,
             idea=idea,
@@ -282,6 +284,7 @@ def _run_resource_finder_agent(
             planning_mode_config=planning_mode,
             planning_meeting_owner=planning_owner,
             planning_meeting_record_root=planning_record_root,
+            focused_autoresearch=PipelineState.read_focused_autoresearch(work_dir),
         )
     finally:
         runtime.clear_idea_tool_context()

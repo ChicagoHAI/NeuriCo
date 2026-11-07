@@ -1053,7 +1053,24 @@ class HitlTerminalChannel(UserChannel):
             planning_discussion_rounds = None
             iterations = 1
             time_limit_seconds = None
+            focused_autoresearch = False
             if operation == "research" and workflow == "autoresearch":
+                if bool(status.get("workflow_locked")):
+                    focused_autoresearch = bool(
+                        status.get("focused_autoresearch", False)
+                    )
+                    self._write_block(
+                        self._ui.system(
+                            "Focused mode: "
+                            + ("Yes" if focused_autoresearch else "No")
+                        )
+                    )
+                else:
+                    focused_autoresearch = self._read_yes_no(
+                        "Focused mode? [y/N]: ",
+                        default=False,
+                        cancellable=True,
+                    )
                 proposal_choice = self._read_choice(
                     "Proposals [single] (single/ranked/collaborative): ",
                     "single",
@@ -1170,6 +1187,7 @@ class HitlTerminalChannel(UserChannel):
                         {
                             "iterations": iterations,
                             "time_limit_seconds": time_limit_seconds,
+                            "focused_autoresearch": focused_autoresearch,
                             "proposal_mode": proposal_mode,
                             **(
                                 {

@@ -387,6 +387,7 @@ class ResearchRunner:
         private: bool = False,
         force_fresh: bool = False,
         scoring_enabled: bool = False,
+        benchmark_mode: bool = False,
         rule_maker_timeout: int = 1800,
         scorer_timeout: int = 600,
         bootstrap_mode: bool = False,
@@ -408,6 +409,7 @@ class ResearchRunner:
         hitl_manager_no_browser: bool = False,
         hitl_host: Optional[Any] = None,
         hitl_mode: str = "full",
+        focused_autoresearch: Optional[bool] = None,
         hitl_work_dir: Optional[Path] = None,
         proposal_mode_config: Optional[ProposalModeConfig] = None,
         planning_mode_config: Optional[PlanningModeConfig] = None,
@@ -432,6 +434,8 @@ class ResearchRunner:
             resource_finder_timeout: Timeout for resource finder in seconds (default: 45 min)
             use_scribe: Use scribe for notebook integration (default: False, raw CLI)
             write_paper: Generate paper draft after experiments (default: False)
+            benchmark_mode: Treat the supplied workspace artifact and scorer as
+                the completion contract instead of requiring REPORT.md.
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
             paper_timeout: Timeout for paper writing in seconds
             force_fresh: Ignore existing local workspace and start a new run from scratch
@@ -481,6 +485,14 @@ class ResearchRunner:
         selected_hitl_modes = [name for name, mode in hitl_modes.items() if mode]
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
+        if focused_autoresearch is not None and type(focused_autoresearch) is not bool:
+            raise TypeError("focused_autoresearch must be a Boolean when supplied.")
+        if focused_autoresearch is not None and not (
+            hitl_autoresearch or hitl_continue_autoresearch
+        ):
+            raise ValueError(
+                "Focused AutoResearch is valid only for managed HITL AutoResearch."
+            )
         hitl = (
             hitl_research
             or hitl_autoresearch
@@ -918,7 +930,10 @@ class ResearchRunner:
                 continue_autoresearch = False
                 autoresearch = True
             if autoresearch:
-                preserve_initial_inputs = prepare_initial_hitl_resume(work_dir)
+                preserve_initial_inputs = prepare_initial_hitl_resume(
+                    work_dir,
+                    focused_autoresearch=focused_autoresearch,
+                )
 
         recovered_hitl_attempt = None
         if hitl and continue_autoresearch:
@@ -1322,8 +1337,10 @@ class ResearchRunner:
                             manager_config=hitl_host.manager.config,
                             hitl_mode=selected_hitl_mode,
                             planning_mode_config=selected_planning_mode,
+                            focused_autoresearch=focused_autoresearch,
                         )
                     else:
+                        initial_args["benchmark_mode"] = benchmark_mode
                         initial_result = construct_fresh_initial_node(**initial_args)
                     pipeline_result = initial_result.pipeline_result or {
                         "success": initial_result.success,
@@ -1376,6 +1393,7 @@ class ResearchRunner:
                         full_permissions=full_permissions,
                         use_scribe=use_scribe,
                         scoring_enabled=scoring_enabled,
+                        benchmark_mode=benchmark_mode,
                         rule_maker_timeout=None if hitl else rule_maker_timeout,
                         scorer_timeout=None if hitl else scorer_timeout,
                         bootstrap_mode=bootstrap_mode,
@@ -2255,6 +2273,11 @@ def main():
         help="Continue an existing HITL AutoResearch workspace from its selected frontier node.",
     )
     parser.add_argument(
+        "--focused-autoresearch",
+        action="store_true",
+        help="Investigate one selected direction at a time in fresh HITL AutoResearch.",
+    )
+    parser.add_argument(
         "--auto",
         action="store_true",
         help="Use manager-resolved Auto HITL for the selected HITL AutoResearch run.",
@@ -2286,6 +2309,8 @@ def main():
     ]
     if len(autoresearch_modes) > 1:
         parser.error("Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes))
+    if args.focused_autoresearch and not args.hitl_autoresearch:
+        parser.error("--focused-autoresearch requires --hitl-autoresearch.")
     # A timeout of 0 disables that stage's wall-clock limit.
     for name in ("timeout", "resource_finder_timeout", "paper_timeout"):
         if getattr(args, name) is not None and getattr(args, name) <= 0:
@@ -2364,6 +2389,7 @@ def main():
             hitl_manager_port=args.hitl_manager_port,
             hitl_manager_no_browser=args.hitl_manager_no_browser,
             hitl_mode="auto" if args.auto else "full",
+            focused_autoresearch=True if args.focused_autoresearch else None,
             workspace_mode=args.workspace_mode,
         )
 

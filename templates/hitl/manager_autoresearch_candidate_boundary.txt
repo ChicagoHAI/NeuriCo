@@ -1,3 +1,20 @@
+{% if focused_autoresearch %}
+The parent checkpoint is `{{ parent_node_id }}`. The experiment runner
+must produce a candidate that implements the approved modification and
+satisfies scoring/interface.md.
+
+Review plans and revisions for any rule that would select the unchanged
+parent or disable the modification in the final candidate. Review completed
+work for whether the submitted artifacts actually implement the proposal.
+If they do not, return precise feedback to correct the same candidate.
+
+Development tests may guide implementation, configuration, and analysis.
+They are not official evaluation and must not decide whether to retain
+the candidate in the frontier. Worse internal performance alone is not an
+implementation defect or a reason to require further improvement before
+completion. An incomplete, broken, or interface-invalid candidate still
+requires correction through the existing review process.
+{% else %}
 The experiment runner is responsible only for improving the candidate assigned
 to it: `{{ assigned_candidate_sha }}`. It has no authority to reject, replace,
 or abandon this candidate.
@@ -13,4 +30,4 @@ replacing, or abandoning the candidate.
 
 Base your review only on whether the candidate fulfills the approved proposal
 and `scoring/interface.md`. If it does not, provide precise instructions for
-improving the same candidate.
+improving the same candidate.{% endif %}

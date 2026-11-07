@@ -204,6 +204,7 @@ def generate_rule_maker_prompt(
     domain: Optional[str] = None,
     *,
     hitl_phase: Optional[str] = None,
+    focused_autoresearch: bool = False,
 ) -> str:
     """
     Build the rule_maker agent's prompt.
@@ -298,6 +299,11 @@ def generate_rule_maker_prompt(
                 f"{banner}\n\n"
                 f"{supplement}\n"
             )
+
+    if focused_autoresearch:
+        focused_path = templates_dir / "hitl" / "focused_autoresearch_rule_maker.txt"
+        focused_contract = focused_path.read_text(encoding="utf-8").strip()
+        prompt = f"{prompt.rstrip()}\n\n{focused_contract}\n"
 
     return prompt
 

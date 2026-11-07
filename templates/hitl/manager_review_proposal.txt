@@ -1,3 +1,14 @@
+{% if focused_autoresearch %}
+The proposal must require the final candidate to implement the proposed
+modification. If it allows an internal comparison to select the unchanged
+parent or remove the modification from the final candidate, return
+rejected_illegal with the precise boundary correction. Require a new
+proposal.
+
+Comparing with the parent is allowed when the parent cannot be selected
+as the final candidate.
+
+{% endif %}
 {% if hitl_mode == "auto" %}
 Review this AutoResearch proposal for Auto HITL admission.
 
@@ -10,7 +21,12 @@ Finalize exactly one outcome:
   specified, and a responsible next attempt;
 - `feedback` when it is legal but needs a different proposal, with concrete
   scope-preserving instructions for the proposer;
+{% if focused_autoresearch %}
+- `rejected_illegal` when it violates an evaluation, artifact, or focused
+  proposal boundary, with
+{% else %}
 - `rejected_illegal` when it violates an evaluation or artifact boundary, with
+{% endif %}
   only the precise boundary correction.
 
 Prefer conservative, reversible choices when evidence is incomplete. Do not
@@ -89,7 +105,12 @@ to update those artifacts through a declared, reproducible experiment or
 evaluation command under the unchanged public scoring protocol.
 
 For `rejected_illegal`, manager_feedback must identify only the detected
+{% if focused_autoresearch %}
+evaluation-integrity or focused proposal-boundary violation and required
+correction. It must not
+{% else %}
 evaluation-integrity violation and required boundary correction. It must not
+{% endif %}
 contain a replacement method or a new research idea. It must make clear that
 the proposer must create a new proposal instead of revising this one.
 

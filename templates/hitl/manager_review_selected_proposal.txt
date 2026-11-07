@@ -50,9 +50,24 @@ research question and evaluation protocol fixed, does not expose or manipulate
 hidden scoring state, does not manufacture score artifacts, and is specific
 enough for one attempt.
 
+{% if focused_autoresearch %}
+The proposal must require the final candidate to implement the proposed
+modification. If it allows an internal comparison to select the unchanged
+parent or remove the modification from the final candidate, return
+`rejected_illegal` with the precise boundary correction needed in a new
+proposal round. Comparing with the parent is allowed when the parent cannot be
+selected as the final candidate.
+{% endif %}
+
 For `rejected_illegal`, feedback must identify only the evaluation-integrity
+{% if focused_autoresearch %}
+or focused proposal-boundary violation and required correction. The completed
+proposal must not be revised or resubmitted; runtime will open a new proposal
+round.
+{% else %}
 violation and required correction. The completed proposal must not be revised
 or resubmitted; runtime will open a new proposal round.
+{% endif %}
 
 Pipeline stage: {{ pipeline_stage }}
 Use read-only workspace inspection only when needed.

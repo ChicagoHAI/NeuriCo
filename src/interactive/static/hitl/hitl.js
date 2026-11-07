@@ -14,7 +14,7 @@
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
     managerStatusSeq: -1,
-    runDraft: { operation: "research", workflow: "autoresearch", hitlMode: "auto", proposalMode: "single", proposerCount: 3, reviewerCount: 3, participantCount: 5, discussionRounds: 3, planningMode: "single", planningParticipantCount: 5, planningDiscussionRounds: 3, iterations: 2, timeLimitSeconds: "", writePaper: true, paperStyle: "auto", github: false },
+    runDraft: { operation: "research", workflow: "autoresearch", focusedAutoresearch: false, hitlMode: "auto", proposalMode: "single", proposerCount: 3, reviewerCount: 3, participantCount: 5, discussionRounds: 3, planningMode: "single", planningParticipantCount: 5, planningDiscussionRounds: 3, iterations: 2, timeLimitSeconds: "", writePaper: true, paperStyle: "auto", github: false },
     portal: null, ideas: [], selectedIdeaId: initialIdeaId, catalogBusy: false,
     creatingIdea: false, ideaSchema: null, ideaDraft: {}, ideaSubmitError: "",
     renamingIdeaId: "", draggedIdeaId: "",
@@ -857,11 +857,13 @@
     if (!canConstructBaseline) state.runDraft.operation = "research";
     const workflowLocked = Boolean(live.workflow_locked);
     if (workflowLocked) state.runDraft.workflow = live.workflow === "ordinary" ? "ordinary" : "autoresearch";
+    if (workflowLocked) state.runDraft.focusedAutoresearch = Boolean(live.focused_autoresearch);
     const operation = q("select", { id: "run-operation", "data-focus-key": "run-operation" }); [["research", "Ordinary research"], ["construct_baseline", "Construct AutoResearch baseline"]].forEach(([value, label]) => operation.append(q("option", { value, text: label }))); operation.value = state.runDraft.operation; operation.onchange = () => { state.runDraft.operation = operation.value; render({ preserveScroll: true }); };
     const constructingBaseline = canConstructBaseline && operation.value === "construct_baseline";
     const title = constructingBaseline ? "Construct baseline" : "Start research";
     const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
     const workflow = q("select", { id: "run-workflow", "data-focus-key": "run-workflow", ...(workflowLocked ? { disabled: "disabled", title: "The workspace research workflow cannot be changed" } : {}) }); [["autoresearch", "AutoResearch"], ["ordinary", "Ordinary"]].forEach(([value, label]) => workflow.append(q("option", { value, text: label }))); workflow.value = state.runDraft.workflow; workflow.onchange = () => { state.runDraft.workflow = workflow.value; render({ preserveScroll: true }); };
+    const focused = q("input", { id: "run-focused-autoresearch", type: "checkbox", "data-focus-key": "run-focused-autoresearch", ...(workflowLocked ? { disabled: "disabled", title: "The workspace AutoResearch mode cannot be changed" } : {}) }); focused.checked = state.runDraft.focusedAutoresearch; focused.onchange = () => { state.runDraft.focusedAutoresearch = focused.checked; };
     const hitlMode = q("select", { id: "run-hitl-mode", "data-focus-key": "run-hitl-mode" }); [["full", "No"], ["auto", "Yes"]].forEach(([value, label]) => hitlMode.append(q("option", { value, text: label }))); hitlMode.value = state.runDraft.hitlMode; hitlMode.onchange = () => { state.runDraft.hitlMode = hitlMode.value; };
     const proposalMode = q("select", { id: "run-proposal-mode", "data-focus-key": "run-proposal-mode" }); [["single", "Single"], ["independent_ranked", "Independent ranked"], ["collaborative", "Collaborative"]].forEach(([value, label]) => proposalMode.append(q("option", { value, text: label }))); proposalMode.value = state.runDraft.proposalMode; proposalMode.onchange = () => { state.runDraft.proposalMode = proposalMode.value; render({ preserveScroll: true }); };
     const proposerCount = q("input", { id: "run-proposer-count", type: "number", min: "2", max: "5", step: "1", required: "required", value: state.runDraft.proposerCount, "data-focus-key": "run-proposer-count" }); proposerCount.oninput = () => { state.runDraft.proposerCount = proposerCount.value; proposerCount.setCustomValidity(""); };
@@ -957,6 +959,7 @@
         }
         payload.iterations = iterationValue;
         payload.time_limit_seconds = duration;
+        payload.focused_autoresearch = focused.checked;
       }
       launchRun(payload);
     };
@@ -975,7 +978,7 @@
       planningMode,
       collaborativePlanningSetup ? q("div", { class: "run-counts" }, [row("Team size", planningParticipantCount), row("Rounds", planningDiscussionRounds)]) : null,
     ]) : null;
-    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), proposals, planning, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
+    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), autoresearchSetup ? q("label", { class: "check-row" }, [focused, q("span", { text: "Focused mode" })]) : null, proposals, planning, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
   }
   function conversation() {
     const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const request = state.snapshot?.inbox?.pending_request; const requestId = String(request?.conversation_record_id || "");
