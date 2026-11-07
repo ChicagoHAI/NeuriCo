@@ -39,7 +39,8 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
                           provider: str = "claude",
                           scoring_enabled: bool = False,
                           phase_name: str = "experiment_runner",
-                          focused_autoresearch: bool = False) -> str:
+                          focused_autoresearch: bool = False,
+                          focused_managed_ordinary: bool = False) -> str:
     """
     Generate comprehensive session instructions for the research agent.
 
@@ -68,6 +69,8 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
     }
     if focused_autoresearch:
         generator_kwargs["focused_autoresearch"] = True
+    if focused_managed_ordinary:
+        generator_kwargs["focused_managed_ordinary"] = True
     try:
         return generator.generate_session_instructions(
             prompt,
@@ -77,9 +80,9 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
         )
     except TypeError:
         # Backwards compatibility: old Docker images don't support 'domain' parameter
-        if focused_autoresearch:
+        if focused_autoresearch or focused_managed_ordinary:
             raise RuntimeError(
-                "Focused HITL AutoResearch requires the current NeuriCo prompt generator."
+                "Focused managed research requires the current NeuriCo prompt generator."
             )
         print(
             "WARNING: Docker image is outdated and does not support domain-specific "

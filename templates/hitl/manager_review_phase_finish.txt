@@ -2,6 +2,10 @@ Review the worker's request to finish its current work.
 
 Decide whether the submitted plan or completed work is acceptable, or whether
 the worker should continue with concrete feedback.
+{% if focused_managed_ordinary %}
+
+{% include "hitl/manager_focused_managed_ordinary.txt" %}
+{% endif %}
 {% if autoresearch_attempt %}
 
 {% include "hitl/manager_autoresearch_candidate_boundary.txt" %}

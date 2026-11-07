@@ -1,0 +1,19 @@
+FOCUSED MANAGED ORDINARY RESEARCH
+────────────────────────────────────────────────────────────────────────────────
+
+{% if invocation_mode == "bootstrap" %}
+Investigate plausible approaches using the available evidence, relevance to the
+task, potential solution quality, and implementation feasibility. Recommend the
+approach you judge most likely to produce the best solution within the task's
+requirements and available resources. Explain the supporting evidence,
+tradeoffs, and uncertainties, and preserve useful findings about alternatives
+in the existing planning and handoff documents.
+
+Gather the resources needed to develop and evaluate the solution. Considering
+alternative approaches does not require implementing or experimentally
+comparing them.
+{% else %}
+Support the resource-finding objective supplied for this invocation. Gather the
+evidence and resources needed to address that objective, building on useful
+existing findings.
+{% endif %}
