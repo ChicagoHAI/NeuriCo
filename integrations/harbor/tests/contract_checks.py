@@ -330,9 +330,7 @@ def test_supervisor_preserves_manager_failure_and_reaps_orphans(
 
 @pytest.mark.skipif(sys.platform != "linux", reason="child subreapers are Linux-specific")
 @pytest.mark.parametrize("exit_code", [0, 124])
-def test_supervisor_preserves_task_service_after_success(
-    tmp_path: Path, exit_code: int
-) -> None:
+def test_supervisor_preserves_task_service_after_success(tmp_path: Path, exit_code: int) -> None:
     service_pid_file = tmp_path / "service.pid"
     code = (
         "import os, subprocess, sys; from pathlib import Path; "
@@ -741,7 +739,6 @@ def test_trace_export_failures_do_not_change_research_result(
         instruction="Run this task.",
         workspace=tmp_path,
         ideas_dir=tmp_path / "ideas",
-        workflow="ordinary",
         artifact_dir=tmp_path / "artifacts",
     )
 

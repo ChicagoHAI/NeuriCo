@@ -158,7 +158,6 @@ def execute_autoresearch(
                         "provider": "codex",
                         "requested_model": requested_model,
                         "hitl_mode": "auto",
-                        "focused": focused_autoresearch,
                         "scoring_enabled": True,
                         "benchmark_mode": True,
                         "autoresearch_iterations": iterations,
