@@ -56,6 +56,88 @@ both cases, review the YAML before spending substantial compute.
 
 ## Useful flags
 
+  constraints:
+    compute: cpu_only  # For AI research
+    budget: 150        # Typical API costs, USD (numeric per schema)
+
+  expected_outputs: [...]
+  evaluation_criteria: [...]
+```
+
+**GPT-4's Role:**
+- **Domain Classification**: Infers appropriate domain from tags and content
+- **Hypothesis Extraction**: Formulates testable hypothesis from description
+- **Methodology Design**: Proposes experimental steps, baselines, and metrics
+- **Constraint Estimation**: Sets realistic compute, time, and budget constraints
+- **Output Specification**: Defines expected results and evaluation criteria
+
+### 3. Validation & Saving
+
+The converted YAML is:
+1. Validated against the schema
+2. Enhanced with metadata (source, source_url)
+3. Saved with a sanitized filename derived from the title
+
+## Examples
+
+### Example 1: AI/LLM Research
+
+**IdeaHub URL:** https://hypogenic.ai/ideahub/idea/HGVv4Z0ALWVHZ9YsstWT
+
+**IdeaHub Content:**
+- Title: "Do LLMs differentiate epistemic belief from non-epistemic belief?"
+- Description: Research on whether LLMs exhibit distinct types of beliefs
+- Tags: Psychology, LLM behavior
+
+**Converted YAML:**
+```yaml
+idea:
+  title: "Evaluating Epistemic vs Non-Epistemic Belief Differentiation in LLMs"
+  domain: artificial_intelligence
+
+  hypothesis: |
+    LLMs demonstrate measurable differences in representing epistemic beliefs
+    (knowledge-based) versus non-epistemic beliefs (religious, moral),
+    similar to human cognitive patterns.
+
+  methodology:
+    approach: "Comparative prompt-based evaluation"
+    steps:
+      - "Design prompts testing epistemic beliefs (factual knowledge)"
+      - "Design prompts testing non-epistemic beliefs (values, preferences)"
+      - "Run across multiple LLMs (GPT-4, Claude, Gemini)"
+      - "Analyze response patterns and confidence levels"
+      - "Compare with human baseline from Vesga et al. (2025)"
+
+    baselines:
+      - "Human belief differentiation patterns from psychology research"
+      - "Zero-shot vs few-shot prompting"
+
+    metrics:
+      - "Belief type classification accuracy"
+      - "Confidence level differences"
+      - "Response consistency across similar prompts"
+```
+
+### Example 2: Complete Workflow
+
+```bash
+# 1. Fetch idea from IdeaHub
+python src/cli/fetch_from_ideahub.py \
+  https://hypogenic.ai/ideahub/idea/ABC123 \
+  --submit
+
+# Output: idea_id_20250103_120000_abc123de
+
+# 2. (Optional) Add resources to workspace
+cd workspace/idea-id-20250103-120000-abc123de
+# Add datasets, papers, etc.
+git add . && git commit -m "Add resources" && git push
+cd ../..
+
+# 3. Run the research
+python src/core/runner.py idea_id_20250103_120000_abc123de
+```
 | Flag | Purpose |
 | --- | --- |
 | `--output PATH` | Write the converted YAML to a specific path |

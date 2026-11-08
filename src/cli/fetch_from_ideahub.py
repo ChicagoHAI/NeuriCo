@@ -10,6 +10,9 @@ import sys
 import os
 import re
 import json
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
@@ -182,18 +185,28 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
     Returns:
         Dictionary with 'parsed' and 'yaml_string' keys
     """
-    title = ideahub_content.get('title') or 'Untitled IdeaHub Idea'
+    title = (ideahub_content.get('title') or '').strip() or 'Untitled IdeaHub Idea'
     description = ideahub_content.get('description', '')
     tags = ideahub_content.get('tags', [])
     url = ideahub_content.get('url', '')
 
+    # The schema bounds title at 10..200 characters, and this is the last
+    # resort -- there is no further path to fall through to -- so a scraped
+    # <h1> that is too short or too long has to be made to fit here rather
+    # than failing validation after the fact.
+    if len(title) < 10:
+        title = f"IdeaHub idea: {title}"
+    if len(title) > 200:
+        title = title[:197] + '...'
+
     # Infer domain from content
     domain = _infer_domain(title, description, tags)
 
-    # Use description as hypothesis, ensuring minimum 20 chars
+    # Use description as hypothesis, ensuring the schema's 20-char minimum.
+    # The prefix plus a >=10-char title always clears it.
     hypothesis = description.strip()
     if len(hypothesis) < 20:
-        hypothesis = f"Investigate: {title}"
+        hypothesis = f"Investigate the research question: {title}"
     # Truncate very long hypotheses to keep it reasonable
     if len(hypothesis) > 500:
         hypothesis = hypothesis[:497] + '...'
@@ -230,39 +243,281 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
     return {'parsed': idea_data, 'yaml_string': yaml_string}
 
 
-def convert_to_yaml(ideahub_content: dict) -> dict:
-    """
-    Use GPT to convert IdeaHub content to NeuriCo YAML format.
+# CLI commands per provider (mirrors agents/manifest_trimmer.py)
+CLI_COMMANDS = {
+    "claude": "claude -p",
+    "codex": "codex exec",
+    "gemini": "gemini",
+}
 
-    Args:
-        ideahub_content: Dictionary with IdeaHub content
+CONVERSION_SYSTEM_PROMPT = (
+    "You are a research assistant that formats research ideas into minimal YAML. "
+    "Only include information explicitly provided - do not invent datasets, methods, "
+    "or metrics. Return valid YAML without markdown formatting."
+)
+
+
+def _extract_yaml(text: str) -> str:
+    """Pull the YAML document out of a raw LLM or CLI response."""
+    fence = re.search(r"```ya?ml\s*\n(.*?)```", text, re.DOTALL)
+    candidate = fence.group(1) if fence else text.replace("```", "")
+
+    # Drop any preamble the CLI printed before the document itself
+    match = re.search(r"^idea:", candidate, re.MULTILINE)
+    if match:
+        candidate = candidate[match.start():]
+
+    return candidate.strip()
+
+
+REQUIRED_IDEA_FIELDS = ('title', 'domain', 'hypothesis')
+
+# Fields the conversion prompt permits the model to emit. Deliberately much
+# narrower than ideas/schema.yaml: IdeaHub pages carry community-submitted,
+# untrusted content, so anything outside this set is dropped rather than
+# written to disk.
+#
+# The exclusions that matter are the schema blocks that are *contractual*
+# rather than advisory, and so would act on the host if a page's text talked
+# the model into emitting them:
+#   local_resources -- staged into the workspace, and its host paths are
+#                      written to ideas/mounts/<id>.txt for docker/run.sh to
+#                      mount; functions marked required_for_evaluation are
+#                      imported and called
+#   evaluation      -- transcribed verbatim into scoring/targets.json
+#   comments        -- drives --comment-mode edits against an existing workspace
+# methodology/expected_outputs/evaluation_criteria are excluded too: the
+# prompt already tells the model not to produce them, so their presence means
+# the model departed from its instructions.
+CONVERTER_ALLOWED_IDEA_FIELDS = frozenset({
+    'title', 'domain', 'hypothesis', 'background', 'constraints', 'metadata',
+})
+
+
+def _strip_disallowed_fields(parsed: dict) -> list:
+    """
+    Drop any idea field the converter is not allowed to emit, in place.
+
+    Stripping rather than rejecting: a disallowed field means the response is
+    untrustworthy in that specific spot, not that the whole conversion is
+    worthless, and falling through would land on the far lossier template
+    path. Removing the field makes it unreachable while keeping the good
+    conversion. Callers re-render the YAML from this dict, so a stripped field
+    never reaches the file.
 
     Returns:
-        Dictionary in NeuriCo format
+        Sorted list of removed field names (empty when nothing was dropped).
     """
-    print("\n🤖 Converting to NeuriCo format using GPT...")
+    idea = parsed['idea']
+    removed = sorted(set(idea) - CONVERTER_ALLOWED_IDEA_FIELDS)
+    for field in removed:
+        del idea[field]
+    return removed
 
-    # Check for an API key: prefer OpenRouter (the repo default), fall back
-    # to a direct OpenAI key.
-    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
-    api_key = openrouter_key or os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("ℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
 
-    try:
-        from openai import OpenAI
-    except ImportError:
-        print("ℹ️  openai package not installed — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
+def _is_structurally_complete(parsed) -> bool:
+    """
+    Cheap structural gate used to decide whether a candidate parse is a
+    NeuriCo idea rather than merely well-formed YAML.
 
-    if openrouter_key:
-        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        model_name = "openai/gpt-4.1"
-    else:
-        client = OpenAI(api_key=api_key)
-        model_name = "gpt-4.1"
+    Requires 'idea' to be the *only* top-level key, so a document followed by
+    provider commentary that happens to parse as a mapping ("Total tokens:
+    812") is rejected and the trailing line gets trimmed instead of retained.
+    Then requires every schema-required field to be present and non-empty, so
+    a partial response -- a title-only idea, or one truncated by max_tokens --
+    is rejected and the caller can fall through to the next conversion path.
+    """
+    if not isinstance(parsed, dict) or set(parsed) != {'idea'}:
+        return False
 
+    idea = parsed['idea']
+    if not isinstance(idea, dict):
+        return False
+
+    return all(
+        isinstance(idea.get(field), str) and idea[field].strip()
+        for field in REQUIRED_IDEA_FIELDS
+    )
+
+
+def _parse_idea_yaml(yaml_content: str) -> tuple:
+    """
+    Parse an idea YAML document, tolerating trailing chatter that CLI agents
+    append after the document (token counts, closing remarks). Trims one line
+    at a time from the end until the text parses as a structurally complete
+    NeuriCo idea, then validates it against the full schema.
+
+    Conversion validates the resulting idea, not just YAML syntax: an
+    incomplete response raises, and convert_to_yaml() falls through to the
+    next path rather than saving a half-formed idea.
+
+    Returns:
+        (parsed_dict, cleaned_yaml_string)
+
+    Raises:
+        ValueError: If no complete, valid idea document can be recovered.
+    """
+    from core.idea_manager import validate_idea_spec
+
+    lines = yaml_content.split("\n")
+    best_candidate = None
+    while lines:
+        text = "\n".join(lines).strip()
+        if text:
+            try:
+                parsed = yaml.safe_load(text)
+            except yaml.YAMLError:
+                parsed = None
+            if best_candidate is None and isinstance(parsed, dict) and 'idea' in parsed:
+                # Longest text that looked like an idea document; kept only to
+                # explain the failure if nothing turns out to be complete.
+                best_candidate = parsed
+            if _is_structurally_complete(parsed):
+                # Drop fields outside the converter's contract before
+                # validating, so a stripped field can never be what makes the
+                # idea valid.
+                removed = _strip_disallowed_fields(parsed)
+                for field in removed:
+                    print(f"   ⚠️  Dropped disallowed field 'idea.{field}' from "
+                          f"the converted idea (not permitted from fetched "
+                          f"content)")
+                if removed:
+                    # Keep the returned string consistent with the dict; every
+                    # caller re-renders today, but a stale pair is a trap.
+                    text = _dump_idea_yaml(parsed)
+                # Full schema validation runs once, on the winning candidate,
+                # so failures name the offending field instead of degrading
+                # into "no document found".
+                report = validate_idea_spec(parsed)
+                if not report['valid']:
+                    raise ValueError(
+                        "converted idea failed validation: "
+                        + "; ".join(report['errors'])
+                    )
+                # Warnings are deliberately not printed here -- main() prints
+                # them once, against the finalized dict that gets written.
+                return parsed, text
+        lines.pop()
+
+    if best_candidate is not None:
+        idea = best_candidate.get('idea')
+        if not isinstance(idea, dict):
+            detail = "'idea' is not a mapping"
+        else:
+            missing = [
+                field for field in REQUIRED_IDEA_FIELDS
+                if not (isinstance(idea.get(field), str) and idea[field].strip())
+            ]
+            detail = f"missing or empty required field(s): {', '.join(missing)}"
+        raise ValueError(
+            f"response contained an 'idea:' document but it was incomplete "
+            f"({detail})"
+        )
+    raise ValueError("no valid 'idea:' YAML document found in the response")
+
+
+def _dump_idea_yaml(idea_data: dict) -> str:
+    """
+    Dump idea data back to YAML, keeping multi-line text as literal blocks so the
+    output stays as readable as what the LLM produced.
+    """
+    class _IdeaDumper(yaml.SafeDumper):
+        pass
+
+    def _represent_str(dumper, value):
+        style = '|' if '\n' in value else None
+        return dumper.represent_scalar('tag:yaml.org,2002:str', value, style=style)
+
+    _IdeaDumper.add_representer(str, _represent_str)
+
+    return yaml.dump(idea_data, Dumper=_IdeaDumper, default_flow_style=False,
+                     sort_keys=False, allow_unicode=True)
+
+
+def _apply_source_metadata(idea_data: dict, ideahub_content: dict) -> dict:
+    """
+    Apply provenance fields the converter -- not the model -- is authoritative
+    for.
+
+    source and source_url are overwritten, never merged: the converter knows
+    it fetched this idea from IdeaHub and knows the exact URL it fetched, so a
+    model-emitted value is at best redundant and at worst a hallucinated URL
+    saved as if it were the real origin. A model value that disagrees is
+    reported before being replaced.
+
+    author is different: it is content, extracted from the page by the model,
+    and the scraped author is only a fallback for the slot the model left
+    empty -- so it keeps setdefault semantics.
+
+    Applied to the parsed dict before the YAML string is regenerated, so the
+    written file and the dict handed to submit_idea() always agree.
+    """
+    if 'idea' not in idea_data:
+        idea_data = {'idea': idea_data}
+
+    metadata = idea_data['idea'].setdefault('metadata', {})
+
+    authoritative = {
+        'source': 'IdeaHub',
+        'source_url': ideahub_content.get('url', ''),
+    }
+    for field, value in authoritative.items():
+        existing = metadata.get(field)
+        if existing is not None and existing != value:
+            print(f"   ⚠️  Ignoring model-supplied metadata.{field} "
+                  f"({existing!r}); using {value!r}")
+        metadata[field] = value
+
+    author = ideahub_content.get('author')
+    if author:
+        metadata.setdefault('author', author)
+
+    return idea_data
+
+
+def _convert_with_cli(prompt: str, provider: str, timeout: int = 300) -> dict:
+    """
+    Convert via a local agent CLI (codex/claude/gemini).
+
+    These authenticate with their own login (e.g. your ChatGPT account for
+    codex), so this path still works when OPENAI_API_KEY is unset or has
+    exhausted its quota.
+    """
+    cmd = CLI_COMMANDS[provider]
+    binary = shlex.split(cmd)[0]
+    if shutil.which(binary) is None:
+        raise RuntimeError(f"'{binary}' not found on PATH")
+
+    print(f"   Calling {provider} CLI ({cmd})...")
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    if provider == "gemini":
+        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+
+    result = subprocess.run(
+        shlex.split(cmd),
+        input=f"{CONVERSION_SYSTEM_PROMPT}\n\n{prompt}",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=timeout,
+    )
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(f"exited with code {result.returncode}: {detail}")
+
+    parsed, yaml_content = _parse_idea_yaml(_extract_yaml(result.stdout))
+    print("   ✓ Conversion complete")
+
+    return {'parsed': parsed, 'yaml_string': yaml_content}
+
+
+def _build_conversion_prompt(ideahub_content: dict) -> str:
+    """Build the IdeaHub -> NeuriCo YAML conversion prompt."""
     # Read schema for reference
     schema_path = Path(__file__).parent.parent.parent / "ideas" / "schema.yaml"
     with open(schema_path, 'r', encoding='utf-8') as f:
@@ -361,81 +616,141 @@ idea:
 ```
 """
 
-    try:
-        print("   Calling GPT API...")
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a research assistant that formats research ideas into minimal YAML. Only include information explicitly provided - do not invent datasets, methods, or metrics. Return valid YAML without markdown formatting."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.1,  # Lower temperature for more conservative output
-            max_tokens=2000  # Reduced since we want minimal output
-        )
+    return prompt
 
-        yaml_content = response.choices[0].message.content.strip()
 
-        # Remove markdown code fences if present
-        yaml_content = re.sub(r'^```ya?ml\s*\n', '', yaml_content)
-        yaml_content = re.sub(r'\n```\s*$', '', yaml_content)
-        yaml_content = yaml_content.strip()
+def _resolve_api_key() -> tuple:
+    """
+    Resolve the LLM API key, preferring OpenRouter (the repo default) over a
+    direct OpenAI key.
 
-        print("   ✓ Conversion complete")
+    Returns:
+        (api_key, use_openrouter) -- api_key is None when neither is set.
+    """
+    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
+    if openrouter_key:
+        return openrouter_key, True
+    return os.getenv('OPENAI_API_KEY'), False
 
-        # Parse YAML to validate
+
+def _convert_with_openai(prompt: str, api_key: str, use_openrouter: bool = False) -> dict:
+    """Convert via the OpenAI API. Raises on auth, quota, or parse failure."""
+    from openai import OpenAI
+
+    if use_openrouter:
+        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+        model_name = "openai/gpt-4.1"
+    else:
+        client = OpenAI(api_key=api_key)
+        model_name = "gpt-4.1"
+
+    print("   Calling GPT API...")
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": CONVERSION_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.1,  # Lower temperature for more conservative output
+        max_tokens=2000  # Reduced since we want minimal output
+    )
+
+    raw = response.choices[0].message.content.strip()
+    parsed, yaml_content = _parse_idea_yaml(_extract_yaml(raw))
+    print("   ✓ Conversion complete")
+
+    return {'parsed': parsed, 'yaml_string': yaml_content}
+
+
+def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
+    """
+    Convert IdeaHub content to NeuriCo YAML format.
+
+    Tries three paths in order, falling through on failure:
+      1. The OpenAI-compatible API, if OPENROUTER_KEY (preferred, the repo
+         default) or OPENAI_API_KEY is set.
+      2. The local agent CLI for `provider` (default codex), which uses its own
+         login rather than an API key -- so it survives a quota error.
+      3. A template-based conversion, which preserves far less of the source
+         idea (no citations, keyword-guessed domain).
+
+    Args:
+        ideahub_content: Dictionary with IdeaHub content
+        provider: Agent CLI to fall back to (claude, codex, gemini)
+
+    Returns:
+        Dictionary with 'parsed' and 'yaml_string' keys
+    """
+    prompt = _build_conversion_prompt(ideahub_content)
+    cli_provider = provider or "codex"
+
+    def _finalize(result: dict) -> dict:
+        """
+        Drop placeholder authors, attach provenance metadata, and re-render the
+        YAML from the same dict.
+
+        The placeholder drop runs before _apply_source_metadata so a scraped
+        author can still fill the slot the model left as 'Unknown'.
+        """
+        idea_data = result['parsed']
+        if 'idea' not in idea_data:
+            idea_data = {'idea': idea_data}
+        idea_data = _drop_placeholder_author(idea_data)
+        idea_data = _apply_source_metadata(idea_data, ideahub_content)
+        return {'parsed': idea_data, 'yaml_string': _dump_idea_yaml(idea_data)}
+
+    api_key, use_openrouter = _resolve_api_key()
+    if api_key:
+        print("\n🤖 Converting to NeuriCo format using GPT...")
         try:
-            parsed = yaml.safe_load(yaml_content)
-        except yaml.YAMLError as e:
-            print(f"⚠️  Warning: Generated YAML may have issues: {e}")
-            print("   Attempting to fix...")
-            # Try to parse anyway
-            parsed = yaml.safe_load(yaml_content)
+            return _finalize(_convert_with_openai(prompt, api_key, use_openrouter))
+        except ImportError:
+            print("⚠️  openai package not installed.")
+        except Exception as e:
+            print(f"⚠️  GPT API call failed: {e}")
+    else:
+        print("\nℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set.")
 
-        parsed, yaml_content = _drop_placeholder_author(parsed, yaml_content)
-        # Return both parsed data and the raw YAML string
-        return {'parsed': parsed, 'yaml_string': yaml_content}
+    if cli_provider in CLI_COMMANDS:
+        print(f"🤖 Converting to NeuriCo format using the {cli_provider} CLI...")
+        try:
+            return _finalize(_convert_with_cli(prompt, cli_provider))
+        except Exception as e:
+            print(f"⚠️  {cli_provider} CLI conversion failed: {e}")
 
-    except Exception as e:
-        print(f"⚠️  GPT API call failed: {e}")
-        print("   Falling back to template-based conversion.")
-        return _convert_without_llm(ideahub_content)
+    print("   Falling back to template-based conversion.")
+    return _finalize(_convert_without_llm(ideahub_content))
 
 
-def _drop_placeholder_author(parsed: dict, yaml_string: str) -> tuple:
+def _drop_placeholder_author(idea_data: dict) -> dict:
     """
     Remove metadata.author when the model emitted the 'Unknown' placeholder
-    despite being told to omit it. Regenerates the YAML string only when a
-    drop actually happened, so faithful conversions stay byte-identical.
+    despite being told to omit it. The caller re-renders the YAML from this
+    dict, so only the parsed structure is touched here.
     """
     try:
-        metadata = parsed['idea']['metadata']
+        metadata = idea_data['idea']['metadata']
         author = metadata.get('author')
     except (KeyError, TypeError):
-        return parsed, yaml_string
+        return idea_data
 
     if isinstance(author, str) and author.strip().lower() in ('unknown', ''):
         del metadata['author']
         if not metadata:
-            del parsed['idea']['metadata']
-        yaml_string = yaml.dump(parsed, default_flow_style=False,
-                                sort_keys=False, allow_unicode=True)
-    return parsed, yaml_string
+            del idea_data['idea']['metadata']
+    return idea_data
 
 
-def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
+def save_yaml_file(result: dict, url: str) -> Path:
     """
     Save the idea as a YAML file.
 
+    Provenance metadata (source, source_url, author) is already applied by
+    convert_to_yaml(), so 'yaml_string' here is a faithful rendering of 'parsed'.
+
     Args:
         result: Dictionary with 'parsed' and 'yaml_string' keys
-        url: Original IdeaHub URL
-        author: Optional author name from IdeaHub
+        url: Original IdeaHub URL (used for the filename fallback)
 
     Returns:
         Path to saved file
@@ -457,22 +772,6 @@ def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
             filename = f"ideahub_{match.group(1)}"
         else:
             filename = "ideahub_idea"
-
-    # Add metadata about source to the parsed data (for submission later)
-    if 'idea' not in idea_data:
-        idea_data = {'idea': idea_data}
-
-    if 'metadata' not in idea_data['idea']:
-        idea_data['idea']['metadata'] = {}
-
-    idea_data['idea']['metadata']['source'] = 'IdeaHub'
-    idea_data['idea']['metadata']['source_url'] = url
-
-    if author and 'author' not in idea_data['idea']['metadata']:
-        idea_data['idea']['metadata']['author'] = author
-
-    # Update the result
-    result['parsed'] = idea_data
 
     # Save to ideas/ directory
     ideas_dir = Path(__file__).parent.parent.parent / "ideas"
@@ -534,7 +833,7 @@ def main():
         "--provider",
         choices=["claude", "gemini", "codex"],
         default=None,
-        help="AI provider for repo naming and --run execution"
+        help="AI provider for YAML conversion fallback, repo naming, and --run execution (default: codex for conversion)"
     )
     parser.add_argument(
         "--no-hash",
@@ -598,8 +897,21 @@ def main():
     if ideahub_content.get('title'):
         print(f"\n✓ Found idea: {ideahub_content['title']}")
 
-    # Step 2: Convert with GPT
-    result = convert_to_yaml(ideahub_content)
+    # Step 2: Convert (GPT, then the provider's CLI, then a template)
+    result = convert_to_yaml(ideahub_content, provider=args.provider)
+
+    # Step 2b: Validate the finished idea before it is written.
+    #
+    # This runs whether or not --submit was passed. The LLM paths already
+    # validated at parse time, but the template fallback has no further path
+    # to fall through to, and provenance metadata is applied after parsing --
+    # so the last word on validity belongs here, on exactly the dict that is
+    # about to be saved.
+    from core.idea_manager import validate_idea_spec
+
+    report = validate_idea_spec(result['parsed'])
+    for warning in report['warnings']:
+        print(f"⚠️  {warning}")
 
     # Step 3: Save file
     if args.output:
@@ -609,7 +921,18 @@ def main():
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(result['yaml_string'])
     else:
-        output_path = save_yaml_file(result, args.url, author=ideahub_content.get('author'))
+        output_path = save_yaml_file(result, args.url)
+
+    if not report['valid']:
+        # Written anyway so the incomplete draft can be hand-edited, but never
+        # reported as a success -- and never submitted.
+        print(f"\n📝 Incomplete idea written to: {output_path}")
+        print("\n❌ Conversion did not produce a complete NeuriCo idea:")
+        for error in report['errors']:
+            print(f"   - {error}")
+        print("\n   Fix the file above, then submit it with:")
+        print(f"     python src/cli/submit.py {output_path}")
+        sys.exit(1)
 
     print(f"\n✅ Idea saved to: {output_path}")
 
