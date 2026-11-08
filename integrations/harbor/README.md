@@ -63,15 +63,34 @@ for human input.
 - NeuriCo's idea registry and Codex home are kept in a temporary control
   directory outside the task repository. Research state and the retained best
   implementation remain in Harbor's workspace.
-- Before Harbor removes the task environment, the adapter publishes a redacted
-  trace bundle under Harbor's conventional `/logs/artifacts/neurico/` path.
-  The bundle includes worker prompts and transcripts, selected durable manager
-  and pipeline state, the manager conversation archive rendered as JSONL, Git
-  provenance, a redacted copy of the combined instruction, and its raw hash in
-  the run manifest.
-  Credential files, live control files, binary workspace data, and the isolated
-  Codex home are not copied. Harbor's normal artifact collector retains this
-  bundle beside the official verifier result.
+- The adapter captures an input snapshot before NeuriCo changes the task
+  workspace and a final snapshot before Harbor removes the environment. Both
+  are published under Harbor's conventional `/logs/artifacts/neurico/` path.
+  Snapshot manifests retain paths, modes, timestamps, original and exported
+  byte counts and SHA-256 hashes, redaction status, symlink targets, capture
+  errors, and a path-by-path exclusion audit. File payloads use one shared
+  content-addressed object store, so unchanged inputs are not copied twice.
+  UTF-8 files are credential-redacted; binary research data is retained
+  byte-for-byte unless it contains a configured secret.
+- The same bundle has a directly readable layer containing every supported
+  worker prompt, log, and provider transcript under `logs/`; durable NeuriCo
+  state; the complete manager conversation-record table rendered from SQLite
+  as redacted JSONL; the combined instruction and its raw hash; run outcome and
+  configuration; Python/package/platform inventory; and workspace and adapter
+  Git HEAD, refs, recent commit graph, status, and text patches. Harbor retains
+  its own ACP event/trajectory and official verifier outputs beside this
+  NeuriCo bundle.
+- Credential-like paths, configured secrets found in binaries, provider homes,
+  dependency caches, hidden or sealed evaluator data, core dumps, live locks,
+  sockets, temporary control files, runtime command wrappers, and the raw
+  manager database are not copied. Each omission is named in the snapshot
+  manifest. Symlinks are recorded but never followed. The isolated Codex home
+  remains outside the task workspace and is not captured. Observable model
+  output and reasoning events are preserved in provider transcripts; private
+  chain-of-thought that a provider does not emit is not available to the
+  adapter. The raw `.git` object database is also excluded because it can
+  contain unredactable historical secrets; refs, commit identities, status,
+  text patches, and the input/final file states are retained instead.
 - Harbor runs NeuriCo in embedded workspace mode. NeuriCo-owned dependency
   metadata and its virtual environment live under `neurico-research-env/`,
   while the task's root `.venv` is never read, reused, or removed by the

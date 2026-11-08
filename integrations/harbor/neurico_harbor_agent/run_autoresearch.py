@@ -28,6 +28,7 @@ from core.runner import ResearchRunner  # noqa: E402
 
 from .artifacts import (  # noqa: E402
     DEFAULT_HARBOR_ARTIFACT_DIR,
+    capture_workspace_snapshot,
     export_harbor_research_artifacts,
 )
 from .runtime import HarborAutoResearchTask, build_harbor_idea  # noqa: E402
@@ -70,10 +71,31 @@ def execute_autoresearch(
     ):
         raise ValueError("AutoResearch time limit must be a positive integer")
 
-    started_at = datetime.now(timezone.utc).isoformat()
-    started_monotonic = time.monotonic()
     result: dict[str, Any] | None = None
     error: BaseException | None = None
+    trace_capture_errors: list[dict[str, str]] = []
+    if artifact_dir is not None:
+        try:
+            capture_workspace_snapshot(
+                workspace=workspace,
+                artifact_dir=artifact_dir,
+                phase="input",
+            )
+        except Exception as snapshot_error:
+            trace_capture_errors.append(
+                {
+                    "phase": "input",
+                    "type": type(snapshot_error).__name__,
+                    "message": str(snapshot_error),
+                }
+            )
+            print(
+                "WARNING: NeuriCo could not capture the initial Harbor workspace "
+                f"snapshot: {snapshot_error}",
+                flush=True,
+            )
+    started_at = datetime.now(timezone.utc).isoformat()
+    started_monotonic = time.monotonic()
     try:
         task = HarborAutoResearchTask(instruction=instruction, workspace=workspace)
         idea_manager = IdeaManager(ideas_dir)
@@ -147,6 +169,7 @@ def execute_autoresearch(
                     elapsed_seconds=time.monotonic() - started_monotonic,
                     result=result,
                     error=error,
+                    trace_capture_errors=trace_capture_errors,
                 )
             except Exception as export_error:
                 print(

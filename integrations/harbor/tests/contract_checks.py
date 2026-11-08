@@ -23,7 +23,10 @@ from neurico_harbor_agent.agent import (
     _text_from_prompt,
 )
 from neurico_harbor_agent.run_autoresearch import execute_autoresearch
-from neurico_harbor_agent.artifacts import export_harbor_research_artifacts
+from neurico_harbor_agent.artifacts import (
+    capture_workspace_snapshot,
+    export_harbor_research_artifacts,
+)
 from neurico_harbor_agent.runtime import (
     CodexInferenceConnection,
     HarborAutoResearchTask,
@@ -501,6 +504,8 @@ def test_child_entrypoint_invokes_manager_driven_auto_hitl_runner(
     assert run_record["configuration"]["workflow"] == "autoresearch"
     assert run_record["result"]["success"] is True
     assert (tmp_path / "artifacts" / "manifest.json").is_file()
+    assert (tmp_path / "artifacts" / "workspace/snapshots/input.json").is_file()
+    assert (tmp_path / "artifacts" / "workspace/snapshots/final.json").is_file()
 
 
 def test_trace_export_preserves_research_records_and_excludes_live_secrets(
@@ -570,6 +575,7 @@ def test_trace_export_preserves_research_records_and_excludes_live_secrets(
     assert not (artifact_dir / "workspace/logs/experiment/binary.bin").exists()
     assert not (artifact_dir / "workspace/.neurico/hitl/control/credential.json").exists()
     assert (artifact_dir / "workspace/.neurico/pipeline_state.json").is_file()
+    assert (artifact_dir / "workspace/snapshots/final.json").is_file()
     history = artifact_dir / "workspace/.neurico/hitl/manager/history.jsonl"
     assert "Review complete" in history.read_text()
     assert json.loads((artifact_dir / "run.json").read_text())["result"] == {"success": True}
@@ -577,6 +583,79 @@ def test_trace_export_preserves_research_records_and_excludes_live_secrets(
     assert "instruction.txt" in manifest_paths
     assert "run.json" in manifest_paths
     assert "manifest.json" not in manifest_paths
+
+
+def test_workspace_snapshots_preserve_reproducible_state_and_audit_exclusions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = "snapshot-test-secret-value"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+
+    source = workspace / "analysis.txt"
+    source.write_text(f"result=initial\nOPENAI_API_KEY={secret}\n", encoding="utf-8")
+    binary = workspace / "results" / "weights.bin"
+    binary.parent.mkdir()
+    binary_payload = b"\x00\xffmodel-output\x10"
+    binary.write_bytes(binary_payload)
+    (workspace / "results" / "unsafe.bin").write_bytes(b"\x00" + secret.encode("utf-8") + b"\xff")
+    (workspace / "empty-directory").mkdir()
+    (workspace / "latest-result").symlink_to("results/weights.bin")
+    (workspace / ".env").write_text(f"OPENAI_API_KEY={secret}\n", encoding="utf-8")
+    hidden = workspace / "data" / ".test"
+    hidden.mkdir(parents=True)
+    (hidden / "answers.json").write_text('{"answer": 42}\n', encoding="utf-8")
+    dependency = workspace / ".venv"
+    dependency.mkdir()
+    (dependency / "installed.txt").write_text("dependency cache\n", encoding="utf-8")
+
+    artifact_dir = workspace / "trace-output"
+    input_manifest = capture_workspace_snapshot(
+        workspace=workspace,
+        artifact_dir=artifact_dir,
+        phase="input",
+    )
+    source.write_text("result=final\n", encoding="utf-8")
+    (workspace / "generated.txt").write_text("new evidence\n", encoding="utf-8")
+    final_manifest = capture_workspace_snapshot(
+        workspace=workspace,
+        artifact_dir=artifact_dir,
+        phase="final",
+    )
+
+    input_files = {entry["path"]: entry for entry in input_manifest["files"]}
+    final_files = {entry["path"]: entry for entry in final_manifest["files"]}
+    assert "generated.txt" not in input_files
+    assert "generated.txt" in final_files
+    assert input_files["analysis.txt"]["redacted"] is True
+    redacted_object = artifact_dir / input_files["analysis.txt"]["object"]
+    assert secret not in redacted_object.read_text()
+    assert "REDACTED" in redacted_object.read_text()
+
+    binary_entry = input_files["results/weights.bin"]
+    assert binary_entry["encoding"] == "binary"
+    assert (artifact_dir / binary_entry["object"]).read_bytes() == binary_payload
+    assert binary_entry["object"] == final_files["results/weights.bin"]["object"]
+    assert {entry["path"] for entry in input_manifest["directories"]} >= {
+        "empty-directory",
+        "results",
+    }
+    assert len(input_manifest["symlinks"]) == 1
+    assert input_manifest["symlinks"][0]["path"] == "latest-result"
+    assert input_manifest["symlinks"][0]["target"] == "results/weights.bin"
+    assert isinstance(input_manifest["symlinks"][0]["mtime_ns"], int)
+
+    exclusions = {(entry["path"], entry["reason"]) for entry in input_manifest["excluded_entries"]}
+    assert (".env", "credential_like_path") in exclusions
+    assert (".venv", "dependency_environment") in exclusions
+    assert ("data/.test", "sealed_or_hidden_evaluation_data") in exclusions
+    assert ("trace-output", "artifact_output") in exclusions
+    assert ("results/unsafe.bin", "binary_contains_configured_secret") in exclusions
+    assert not any(path.startswith("trace-output/") for path in input_files)
+    assert (artifact_dir / "workspace/snapshots/input.json").is_file()
+    assert (artifact_dir / "workspace/snapshots/final.json").is_file()
 
 
 def test_child_translates_native_budget_stop_after_neurico_finalization(
