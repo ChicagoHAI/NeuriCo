@@ -63,6 +63,15 @@ for human input.
 - NeuriCo's idea registry and Codex home are kept in a temporary control
   directory outside the task repository. Research state and the retained best
   implementation remain in Harbor's workspace.
+- Before Harbor removes the task environment, the adapter publishes a redacted
+  trace bundle under Harbor's conventional `/logs/artifacts/neurico/` path.
+  The bundle includes worker prompts and transcripts, selected durable manager
+  and pipeline state, the manager conversation archive rendered as JSONL, Git
+  provenance, a redacted copy of the combined instruction, and its raw hash in
+  the run manifest.
+  Credential files, live control files, binary workspace data, and the isolated
+  Codex home are not copied. Harbor's normal artifact collector retains this
+  bundle beside the official verifier result.
 - Harbor runs NeuriCo in embedded workspace mode. NeuriCo-owned dependency
   metadata and its virtual environment live under `neurico-research-env/`,
   while the task's root `.venv` is never read, reused, or removed by the

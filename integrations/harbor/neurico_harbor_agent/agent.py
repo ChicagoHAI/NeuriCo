@@ -46,6 +46,7 @@ from .runtime import (
     HarborAutoResearchTask,
     build_autoresearch_environment,
 )
+from .artifacts import DEFAULT_HARBOR_ARTIFACT_DIR
 from .process_control import (
     owned_process_group_ids as _owned_process_group_ids,
     signal_process_groups as _signal_process_groups,
@@ -208,6 +209,10 @@ async def run_autoresearch_process(
             str(ideas_dir),
             "--iterations",
             str(iterations),
+            "--artifact-dir",
+            str(DEFAULT_HARBOR_ARTIFACT_DIR),
+            "--requested-model",
+            connection.requested_model,
         ]
         if time_limit_seconds is not None:
             command.extend(["--time-limit-seconds", str(time_limit_seconds)])

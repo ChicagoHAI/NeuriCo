@@ -1,6 +1,8 @@
 import asyncio
+import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -21,6 +23,7 @@ from neurico_harbor_agent.agent import (
     _text_from_prompt,
 )
 from neurico_harbor_agent.run_autoresearch import execute_autoresearch
+from neurico_harbor_agent.artifacts import export_harbor_research_artifacts
 from neurico_harbor_agent.runtime import (
     CodexInferenceConnection,
     HarborAutoResearchTask,
@@ -468,6 +471,8 @@ def test_child_entrypoint_invokes_manager_driven_auto_hitl_runner(
         ideas_dir=tmp_path / "ideas",
         iterations=2,
         time_limit_seconds=1740,
+        artifact_dir=tmp_path / "artifacts",
+        requested_model="openai/test-model",
     )
 
     assert result["success"] is True
@@ -491,6 +496,87 @@ def test_child_entrypoint_invokes_manager_driven_auto_hitl_runner(
         "workspace_mode": "embedded",
     }
     assert "autoresearch" not in captured["run"]
+    run_record = json.loads((tmp_path / "artifacts" / "run.json").read_text())
+    assert run_record["configuration"]["requested_model"] == "openai/test-model"
+    assert run_record["configuration"]["workflow"] == "autoresearch"
+    assert run_record["result"]["success"] is True
+    assert (tmp_path / "artifacts" / "manifest.json").is_file()
+
+
+def test_trace_export_preserves_research_records_and_excludes_live_secrets(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    logs = workspace / "logs" / "experiment"
+    logs.mkdir(parents=True)
+    (logs / "worker_transcript.jsonl").write_text(
+        '{"message":"OPENAI_API_KEY=definitely-secret-value"}\n',
+        encoding="utf-8",
+    )
+    (logs / "binary.bin").write_bytes(b"not a trace")
+
+    neurico = workspace / ".neurico"
+    manager = neurico / "hitl" / "manager"
+    manager.mkdir(parents=True)
+    (neurico / "pipeline_state.json").write_text(
+        '{"workflow":"ordinary","completed":true}\n',
+        encoding="utf-8",
+    )
+    control = neurico / "hitl" / "control"
+    control.mkdir()
+    (control / "credential.json").write_text('{"token":"never-copy-this"}\n')
+
+    database = manager / "history.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE conversation_records (
+                sequence INTEGER PRIMARY KEY,
+                record_id TEXT NOT NULL,
+                record_type TEXT NOT NULL,
+                speaker TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL
+            );
+            INSERT INTO conversation_records VALUES (
+                1, 'record-1', 'message', 'manager', 'Review complete',
+                '2026-11-08T00:00:00Z', '{}'
+            );
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    artifact_dir = tmp_path / "artifacts"
+    manifest = export_harbor_research_artifacts(
+        workspace=workspace,
+        artifact_dir=artifact_dir,
+        project_root=tmp_path / "not-a-repository",
+        instruction="Solve the supplied task exactly.",
+        run_configuration={"workflow": "ordinary", "focused": True},
+        started_at="2026-11-08T00:00:00+00:00",
+        elapsed_seconds=12.5,
+        result={"success": True},
+        error=None,
+    )
+
+    transcript = artifact_dir / "workspace/logs/experiment/worker_transcript.jsonl"
+    assert transcript.is_file()
+    assert "definitely-secret-value" not in transcript.read_text()
+    assert "REDACTED" in transcript.read_text()
+    assert not (artifact_dir / "workspace/logs/experiment/binary.bin").exists()
+    assert not (artifact_dir / "workspace/.neurico/hitl/control/credential.json").exists()
+    assert (artifact_dir / "workspace/.neurico/pipeline_state.json").is_file()
+    history = artifact_dir / "workspace/.neurico/hitl/manager/history.jsonl"
+    assert "Review complete" in history.read_text()
+    assert json.loads((artifact_dir / "run.json").read_text())["result"] == {"success": True}
+    manifest_paths = {entry["path"] for entry in manifest["files"]}
+    assert "instruction.txt" in manifest_paths
+    assert "run.json" in manifest_paths
+    assert "manifest.json" not in manifest_paths
 
 
 def test_child_translates_native_budget_stop_after_neurico_finalization(
