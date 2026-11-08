@@ -71,15 +71,22 @@ for human input.
   errors, and a path-by-path exclusion audit. File payloads use one shared
   content-addressed object store, so unchanged inputs are not copied twice.
   UTF-8 files are credential-redacted; binary research data is retained
-  byte-for-byte unless it contains a configured secret.
+  byte-for-byte unless it contains a configured secret. Trace collection is
+  best-effort and bounded so it cannot grow without limit: each file is capped
+  at 64 MiB, the input snapshot may add 256 MiB of objects, the complete object
+  store may reach 512 MiB after the final snapshot, each snapshot gets 30
+  seconds, and 256 MiB of free disk is reserved. The directly readable copies
+  have a separate 128 MiB budget. Every skipped path and incomplete snapshot is
+  recorded in its manifest.
 - The same bundle has a directly readable layer containing every supported
   worker prompt, log, and provider transcript under `logs/`; durable NeuriCo
   state; the complete manager conversation-record table rendered from SQLite
   as redacted JSONL; the combined instruction and its raw hash; run outcome and
   configuration; Python/package/platform inventory; and workspace and adapter
-  Git HEAD, refs, recent commit graph, status, and text patches. Harbor retains
-  its own ACP event/trajectory and official verifier outputs beside this
-  NeuriCo bundle.
+  Git HEAD, refs, recent commit graph, status, and diff file lists/statistics.
+  The input/final content objects provide the actual retained file states.
+  Harbor retains its own ACP event/trajectory and official verifier outputs
+  beside this NeuriCo bundle.
 - Credential-like paths, configured secrets found in binaries, provider homes,
   dependency caches, hidden or sealed evaluator data, core dumps, live locks,
   sockets, temporary control files, runtime command wrappers, and the raw
@@ -90,7 +97,7 @@ for human input.
   chain-of-thought that a provider does not emit is not available to the
   adapter. The raw `.git` object database is also excluded because it can
   contain unredactable historical secrets; refs, commit identities, status,
-  text patches, and the input/final file states are retained instead.
+  diff metadata, and the input/final file states are retained instead.
 - Harbor runs NeuriCo in embedded workspace mode. NeuriCo-owned dependency
   metadata and its virtual environment live under `neurico-research-env/`,
   while the task's root `.venv` is never read, reused, or removed by the

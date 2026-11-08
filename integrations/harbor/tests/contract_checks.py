@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import neurico_harbor_agent.agent as agent_module
+import neurico_harbor_agent.artifacts as artifacts_module
 import neurico_harbor_agent.run_autoresearch as runner_module
 import pytest
 from acp import PROTOCOL_VERSION, RequestError, spawn_agent_process
@@ -656,6 +657,96 @@ def test_workspace_snapshots_preserve_reproducible_state_and_audit_exclusions(
     assert not any(path.startswith("trace-output/") for path in input_files)
     assert (artifact_dir / "workspace/snapshots/input.json").is_file()
     assert (artifact_dir / "workspace/snapshots/final.json").is_file()
+
+
+def test_workspace_snapshot_limits_are_audited_without_reading_oversized_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    oversized = workspace / "oversized.bin"
+    with oversized.open("wb") as handle:
+        handle.truncate(32)
+    (workspace / "budget.txt").write_text("12345", encoding="utf-8")
+
+    monkeypatch.setattr(artifacts_module, "_SNAPSHOT_MAX_FILE_BYTES", 16)
+    monkeypatch.setattr(artifacts_module, "_SNAPSHOT_INPUT_OBJECT_BUDGET_BYTES", 4)
+    monkeypatch.setattr(artifacts_module, "_SNAPSHOT_MIN_FREE_BYTES", 0)
+    manifest = capture_workspace_snapshot(
+        workspace=workspace,
+        artifact_dir=tmp_path / "artifacts",
+        phase="input",
+    )
+
+    exclusions = {(entry["path"], entry["reason"]) for entry in manifest["excluded_entries"]}
+    assert ("oversized.bin", "file_size_limit") in exclusions
+    assert ("budget.txt", "snapshot_object_budget") in exclusions
+    assert manifest["capture_complete"] is True
+
+
+def test_workspace_snapshot_time_budget_stops_best_effort_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "input.txt").write_text("input\n", encoding="utf-8")
+    monkeypatch.setattr(artifacts_module, "_SNAPSHOT_MAX_CAPTURE_SECONDS", 0.0)
+
+    manifest = capture_workspace_snapshot(
+        workspace=workspace,
+        artifact_dir=tmp_path / "artifacts",
+        phase="input",
+    )
+
+    assert manifest["capture_complete"] is False
+    assert manifest["capture_stop_reason"] == "capture_time_budget_exhausted"
+    assert manifest["files"] == []
+
+
+def test_trace_export_failures_do_not_change_research_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeManager:
+        def __init__(self, ideas_dir: Path):
+            pass
+
+        def submit_idea(self, idea: dict[str, Any], validate: bool) -> str:
+            return "harbor-idea"
+
+    class FakeRunner:
+        def __init__(self, *, use_github: bool):
+            pass
+
+        def run_research(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append("research")
+            return {"success": True}
+
+    def fail_snapshot(**kwargs: Any) -> dict[str, Any]:
+        raise OSError("snapshot unavailable")
+
+    def fail_export(**kwargs: Any) -> dict[str, Any]:
+        raise OSError("export unavailable")
+
+    monkeypatch.setattr(runner_module, "IdeaManager", FakeManager)
+    monkeypatch.setattr(runner_module, "ResearchRunner", FakeRunner)
+    monkeypatch.setattr(runner_module, "capture_workspace_snapshot", fail_snapshot)
+    monkeypatch.setattr(runner_module, "export_harbor_research_artifacts", fail_export)
+
+    result = execute_autoresearch(
+        instruction="Run this task.",
+        workspace=tmp_path,
+        ideas_dir=tmp_path / "ideas",
+        workflow="ordinary",
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    assert result == {"success": True}
+    assert calls == ["research"]
 
 
 def test_child_translates_native_budget_stop_after_neurico_finalization(

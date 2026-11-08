@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -62,6 +63,15 @@ _SECRET_FILE_NAMES = frozenset(
 )
 _SECRET_FILE_SUFFIXES = (".key", ".kubeconfig", ".p12", ".pem", ".pfx")
 _CORE_DUMP_NAME = re.compile(r"^core(?:\.\d+)?$")
+_SHA256_NAME = re.compile(r"^[0-9a-f]{64}$")
+_SNAPSHOT_MAX_FILE_BYTES = 64 * 1024 * 1024
+_SNAPSHOT_INPUT_OBJECT_BUDGET_BYTES = 256 * 1024 * 1024
+_SNAPSHOT_TOTAL_OBJECT_BUDGET_BYTES = 512 * 1024 * 1024
+_SNAPSHOT_MIN_FREE_BYTES = 256 * 1024 * 1024
+_SNAPSHOT_MAX_CAPTURE_SECONDS = 30.0
+_READABLE_TRACE_BUDGET_BYTES = 128 * 1024 * 1024
+_MANAGER_HISTORY_MAX_BYTES = 128 * 1024 * 1024
+_GIT_COMMAND_TIMEOUT_SECONDS = 3.0
 _SAFE_ENVIRONMENT_VALUES = frozenset(
     {
         "LANG",
@@ -224,10 +234,18 @@ def _read_regular_file_without_following_symlinks(source: Path) -> tuple[bytes, 
 
 def _runtime_inventory() -> dict[str, Any]:
     packages: dict[str, str] = {}
-    for distribution in importlib_metadata.distributions():
-        name = str(distribution.metadata.get("Name", "")).strip()
-        if name:
-            packages[name] = distribution.version
+    try:
+        distributions = importlib_metadata.distributions()
+        for distribution in distributions:
+            try:
+                name = str(distribution.metadata.get("Name", "")).strip()
+                version = distribution.version
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if name:
+                packages[name] = version
+    except (OSError, UnicodeError, ValueError):
+        pass
     return {
         "python": {
             "version": platform.python_version(),
@@ -267,6 +285,19 @@ def capture_workspace_snapshot(
     objects_dir = artifact_dir / "workspace/snapshots/objects"
     objects_dir.mkdir(parents=True, exist_ok=True)
     artifact_relative = _artifact_relative_to_workspace(workspace, artifact_dir)
+    object_budget = (
+        _SNAPSHOT_INPUT_OBJECT_BUDGET_BYTES
+        if phase == "input"
+        else _SNAPSHOT_TOTAL_OBJECT_BUDGET_BYTES
+    )
+    object_store_bytes = sum(
+        path.stat().st_size
+        for path in objects_dir.rglob("*")
+        if path.is_file() and _SHA256_NAME.fullmatch(path.name)
+    )
+    capture_deadline = capture_started_monotonic + _SNAPSHOT_MAX_CAPTURE_SECONDS
+    capture_complete = True
+    capture_stop_reason: str | None = None
 
     files: list[dict[str, Any]] = []
     directories: list[dict[str, Any]] = []
@@ -277,6 +308,10 @@ def capture_workspace_snapshot(
     configured_secret_values = [value.encode("utf-8") for value in sensitive_env_values() if value]
 
     for directory, directory_names, file_names in os.walk(workspace, followlinks=False):
+        if time.monotonic() >= capture_deadline:
+            capture_complete = False
+            capture_stop_reason = "capture_time_budget_exhausted"
+            break
         directory_path = Path(directory)
         directory_relative = directory_path.relative_to(workspace)
         if directory_relative.parts:
@@ -325,6 +360,10 @@ def capture_workspace_snapshot(
         directory_names[:] = retained_directories
 
         for name in sorted(file_names):
+            if time.monotonic() >= capture_deadline:
+                capture_complete = False
+                capture_stop_reason = "capture_time_budget_exhausted"
+                break
             source = directory_path / name
             relative = source.relative_to(workspace)
             if source.is_symlink():
@@ -375,6 +414,16 @@ def capture_workspace_snapshot(
                     byte_count=source_stat.st_size,
                 )
                 continue
+            if source_stat.st_size > _SNAPSHOT_MAX_FILE_BYTES:
+                _record_exclusion(
+                    excluded,
+                    excluded_entries,
+                    "file_size_limit",
+                    relative=relative,
+                    entry_type="file",
+                    byte_count=source_stat.st_size,
+                )
+                continue
             try:
                 raw_payload, opened_stat = _read_regular_file_without_following_symlinks(source)
             except OSError as error:
@@ -418,7 +467,34 @@ def capture_workspace_snapshot(
                 redacted = artifact_payload != raw_payload
             artifact_digest = sha256(artifact_payload).hexdigest()
             object_path = objects_dir / artifact_digest[:2] / artifact_digest
+            object_already_present = object_path.is_file()
+            if not object_already_present:
+                available_bytes = shutil.disk_usage(artifact_dir).free
+                if object_store_bytes + len(artifact_payload) > object_budget:
+                    _record_exclusion(
+                        excluded,
+                        excluded_entries,
+                        "snapshot_object_budget",
+                        relative=relative,
+                        entry_type="file",
+                        byte_count=source_stat.st_size,
+                    )
+                    continue
+                if available_bytes - len(artifact_payload) < _SNAPSHOT_MIN_FREE_BYTES:
+                    _record_exclusion(
+                        excluded,
+                        excluded_entries,
+                        "artifact_disk_reserve",
+                        relative=relative,
+                        entry_type="file",
+                        byte_count=source_stat.st_size,
+                    )
+                    continue
             _write_snapshot_object(object_path, artifact_payload)
+            if not object_path.is_file():
+                raise OSError(f"Snapshot object was not created: {object_path}")
+            if not object_already_present:
+                object_store_bytes += len(artifact_payload)
             try:
                 final_stat = source.lstat()
             except OSError:
@@ -465,7 +541,15 @@ def capture_workspace_snapshot(
             "binary": "Binary content is byte-exact unless it contains a configured secret.",
             "symlinks": "Link targets are recorded but never followed.",
             "objects": "Input and final snapshots share content-addressed objects.",
+            "limits": {
+                "maximum_file_bytes": _SNAPSHOT_MAX_FILE_BYTES,
+                "object_budget_bytes": object_budget,
+                "minimum_free_bytes": _SNAPSHOT_MIN_FREE_BYTES,
+                "maximum_capture_seconds": _SNAPSHOT_MAX_CAPTURE_SECONDS,
+            },
         },
+        "capture_complete": capture_complete,
+        "capture_stop_reason": capture_stop_reason,
         "totals": {
             "files": len(files),
             "source_bytes": sum(entry["bytes"] for entry in files),
@@ -495,15 +579,21 @@ def capture_workspace_snapshot(
     return manifest
 
 
-def _copy_text_file(source: Path, destination: Path) -> bool:
+def _copy_text_file(source: Path, destination: Path, *, remaining_bytes: int) -> int:
     if not source.is_file() or source.is_symlink():
-        return False
+        return 0
     try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source_bytes = source.stat().st_size
+        if source_bytes > _SNAPSHOT_MAX_FILE_BYTES or source_bytes > remaining_bytes:
+            return 0
+        if shutil.disk_usage(destination.parent).free - source_bytes < _SNAPSHOT_MIN_FREE_BYTES:
+            return 0
         content = source.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
+        return 0
     _write_sanitized(destination, content)
-    return True
+    return destination.stat().st_size
 
 
 def _workspace_trace_files(workspace: Path) -> Iterable[tuple[Path, Path]]:
@@ -526,6 +616,7 @@ def _export_manager_history(workspace: Path, destination: Path) -> bool:
     database = workspace / ".neurico" / "hitl" / "manager" / "history.sqlite"
     if not database.is_file():
         return False
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     try:
         connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
         connection.row_factory = sqlite3.Row
@@ -533,23 +624,49 @@ def _export_manager_history(workspace: Path, destination: Path) -> bool:
             rows = connection.execute(
                 "SELECT sequence, record_id, record_type, speaker, content, "
                 "created_at, metadata_json FROM conversation_records ORDER BY sequence"
-            ).fetchall()
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with temporary.open("w", encoding="utf-8") as handle:
+                written_bytes = 0
+                for row in rows:
+                    record = dict(row)
+                    raw_metadata = record.pop("metadata_json", "{}")
+                    try:
+                        metadata = json.loads(str(raw_metadata))
+                    except json.JSONDecodeError:
+                        metadata = {}
+                    record["metadata"] = metadata if isinstance(metadata, dict) else {}
+                    rendered = json.dumps(record, ensure_ascii=False, sort_keys=True)
+                    rendered_line = sanitize_text(rendered) + "\n"
+                    line_bytes = len(rendered_line.encode("utf-8"))
+                    if (
+                        shutil.disk_usage(destination.parent).free - line_bytes
+                        < _SNAPSHOT_MIN_FREE_BYTES
+                    ):
+                        truncation_reason = "artifact_disk_reserve"
+                    elif written_bytes + line_bytes > _MANAGER_HISTORY_MAX_BYTES:
+                        truncation_reason = "manager_history_export_budget"
+                    else:
+                        truncation_reason = None
+                    if truncation_reason is not None:
+                        truncation = json.dumps(
+                            {
+                                "record_type": "trace_truncation",
+                                "reason": truncation_reason,
+                                "maximum_bytes": _MANAGER_HISTORY_MAX_BYTES,
+                            },
+                            sort_keys=True,
+                        )
+                        handle.write(truncation + "\n")
+                        break
+                    handle.write(rendered_line)
+                    written_bytes += line_bytes
+            os.replace(temporary, destination)
         finally:
             connection.close()
     except (OSError, sqlite3.Error):
+        temporary.unlink(missing_ok=True)
         return False
-
-    rendered: list[str] = []
-    for row in rows:
-        record = dict(row)
-        raw_metadata = record.pop("metadata_json", "{}")
-        try:
-            metadata = json.loads(str(raw_metadata))
-        except json.JSONDecodeError:
-            metadata = {}
-        record["metadata"] = metadata if isinstance(metadata, dict) else {}
-        rendered.append(json.dumps(record, ensure_ascii=False, sort_keys=True))
-    _write_sanitized(destination, "\n".join(rendered) + ("\n" if rendered else ""))
     return True
 
 
@@ -560,7 +677,7 @@ def _git_output(repository: Path, *arguments: str) -> str | None:
             check=True,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -573,8 +690,10 @@ def _write_git_provenance(repository: Path, destination: Path) -> None:
         "status.txt": ("status", "--short"),
         "refs.txt": ("show-ref", "--head"),
         "recent-commits.txt": ("log", "--all", "-100", "--format=%H %P %aI %s"),
-        "working-tree.patch": ("diff", "--no-ext-diff", "--no-color"),
-        "index.patch": ("diff", "--cached", "--no-ext-diff", "--no-color"),
+        "working-tree-stat.txt": ("diff", "--no-ext-diff", "--stat"),
+        "working-tree-files.txt": ("diff", "--no-ext-diff", "--name-status"),
+        "index-stat.txt": ("diff", "--cached", "--no-ext-diff", "--stat"),
+        "index-files.txt": ("diff", "--cached", "--no-ext-diff", "--name-status"),
     }
     for name, arguments in commands.items():
         output = _git_output(repository, *arguments)
@@ -584,14 +703,27 @@ def _write_git_provenance(repository: Path, destination: Path) -> None:
 
 def _artifact_manifest(artifact_dir: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
+    objects_dir = artifact_dir / "workspace/snapshots/objects"
     for path in sorted(artifact_dir.rglob("*")):
         if not path.is_file() or path == artifact_dir / "manifest.json":
             continue
+        try:
+            object_relative = path.relative_to(objects_dir)
+        except ValueError:
+            object_relative = None
+        if (
+            object_relative is not None
+            and len(object_relative.parts) == 2
+            and _SHA256_NAME.fullmatch(path.name)
+        ):
+            digest = path.name
+        else:
+            digest = _sha256_file(path)
         entries.append(
             {
                 "path": path.relative_to(artifact_dir).as_posix(),
                 "bytes": path.stat().st_size,
-                "sha256": _sha256_file(path),
+                "sha256": digest,
             }
         )
     return entries
@@ -630,8 +762,13 @@ def export_harbor_research_artifacts(
             }
         )
 
+    readable_trace_bytes = 0
     for source, relative_destination in _workspace_trace_files(workspace):
-        _copy_text_file(source, artifact_dir / relative_destination)
+        readable_trace_bytes += _copy_text_file(
+            source,
+            artifact_dir / relative_destination,
+            remaining_bytes=max(0, _READABLE_TRACE_BUDGET_BYTES - readable_trace_bytes),
+        )
     _export_manager_history(
         workspace,
         artifact_dir / "workspace/.neurico/hitl/manager/history.jsonl",
