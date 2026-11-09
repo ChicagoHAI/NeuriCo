@@ -63,41 +63,134 @@ for human input.
 - NeuriCo's idea registry and Codex home are kept in a temporary control
   directory outside the task repository. Research state and the retained best
   implementation remain in Harbor's workspace.
-- The adapter captures an input snapshot before NeuriCo changes the task
-  workspace and a final snapshot before Harbor removes the environment. Both
-  are published under Harbor's conventional `/logs/artifacts/neurico/` path.
-  Snapshot manifests retain paths, modes, timestamps, original and exported
-  byte counts and SHA-256 hashes, redaction status, symlink targets, capture
-  errors, and a path-by-path exclusion audit. File payloads use one shared
-  content-addressed object store, so unchanged inputs are not copied twice.
-  UTF-8 files are credential-redacted; binary research data is retained
-  byte-for-byte unless it contains a configured secret. Trace collection is
-  best-effort and bounded so it cannot grow without limit: each file is capped
-  at 64 MiB, the input snapshot may add 256 MiB of objects, the complete object
-  store may reach 512 MiB after the final snapshot, each snapshot gets 30
-  seconds, and 256 MiB of free disk is reserved. The directly readable copies
-  have a separate 128 MiB budget. Every skipped path and incomplete snapshot is
-  recorded in its manifest.
-- The same bundle has a directly readable layer containing every supported
-  worker prompt, log, and provider transcript under `logs/`; durable NeuriCo
-  state; the complete manager conversation-record table rendered from SQLite
-  as redacted JSONL; the combined instruction and its raw hash; run outcome and
-  configuration; Python/package/platform inventory; and workspace and adapter
-  Git HEAD, refs, recent commit graph, status, and diff file lists/statistics.
-  The input/final content objects provide the actual retained file states.
-  Harbor retains its own ACP event/trajectory and official verifier outputs
-  beside this NeuriCo bundle.
-- Credential-like paths, configured secrets found in binaries, provider homes,
-  dependency caches, hidden or sealed evaluator data, core dumps, live locks,
-  sockets, temporary control files, runtime command wrappers, and the raw
-  manager database are not copied. Each omission is named in the snapshot
-  manifest. Symlinks are recorded but never followed. The isolated Codex home
-  remains outside the task workspace and is not captured. Observable model
-  output and reasoning events are preserved in provider transcripts; private
-  chain-of-thought that a provider does not emit is not available to the
-  adapter. The raw `.git` object database is also excluded because it can
-  contain unredactable historical secrets; refs, commit identities, status,
-  diff metadata, and the input/final file states are retained instead.
+- The Harbor parent supervisor performs trace collection, but
+  `/logs/artifacts/` is an agent-controlled Harbor publication channel rather
+  than an operating-system trust boundary. Before launch, the parent opens
+  non-following directory capabilities for the publication and mode-`0700`
+  transaction roots and records the task-workspace identity. No run-specific
+  entry exists while the supervised process is active. After it exits, the
+  parent verifies those identities, builds one run directory in a sibling
+  transaction root, revalidates the complete allowlisted text payload, and
+  publishes it with descriptor-relative rename. Export failure discards the
+  staging tree before a metadata-only fallback is attempted.
+- Successful NeuriCo runs may intentionally leave task services alive for the
+  benchmark verifier. Such same-UID processes can still mutate the
+  agent-controlled artifact channel. `manifest.json` records every public
+  member's size and SHA-256 digest so consumers can detect accidental missing,
+  added, or modified files. This is a consistency check, not a trusted
+  attestation: a deployment that needs adversarial tamper resistance must copy
+  the bundle into Harbor-controlled storage outside the task environment.
+- Before launch, the parent keeps a bounded in-memory inventory of eligible
+  file identities (path, device, inode, link count, size, modification/change
+  timestamps, and mode), without reading or storing file payloads. The
+  inventory is never passed to the child or written to the trace bundle.
+  Post-run collection copies public text files that are new or changed relative
+  to that inventory. Unchanged benchmark inputs are not duplicated, while a
+  changed public implementation file is retained so the final research state
+  is not silently omitted. If inventory collection is incomplete, unknown
+  paths fail closed.
+- Trace eligibility is an authority decision, not a payload-similarity guess.
+  Canonical sealed evaluator paths, hidden evaluation datasets, every
+  non-public file under `scoring/`, all `.neurico/` control state,
+  rule-maker/scorer/evaluator/manager logs, and unclassified logs are never read
+  as artifact payloads. The exporter does not load sealed data to build text
+  fingerprints. Public `scoring/interface.md` and `scoring/results.json` remain
+  eligible because NeuriCo already defines them as worker/review evidence rather
+  than evaluator authority.
+- The trace collector adopts NeuriCo's behavioral, application-level sealing
+  model. Research workers are required not to access sealed evaluator material;
+  logs emitted by explicitly public worker roles are therefore treated as
+  public without comparing them against evaluator contents. Evaluator, scorer,
+  rule-maker, verifier, and manager producers remain private regardless of
+  filename suffix or payload. This is not an operating-system sandbox: a worker
+  that deliberately bypasses NeuriCo's sealing contract is outside the trace
+  collector's threat model and must be addressed in the core execution and
+  evaluator-isolation architecture, not by post-hoc trace scanning.
+- Workers are likewise required not to inspect or disclose unrelated mounted
+  credentials. Configured NeuriCo/provider credentials and recognizable common
+  secret forms are still actively redacted, but the collector does not claim
+  to recognize every arbitrary opaque string from an unregistered mounted
+  file. Deliberate access to such a file is an execution/access-control failure
+  outside this trace collector's threat model.
+- Eligible new or changed workspace files and explicitly role-labeled public
+  research logs are copied once beneath `workspace/files/`. Every path
+  component is opened relative to a verified workspace directory descriptor;
+  file device, inode, link count, size, timestamps, and mode must remain stable
+  through the read. Only sanitized UTF-8 text is exportable. Changed or new
+  binaries (including ASCII-looking files with binary extensions) make public
+  capture explicitly partial; their paths and payloads remain withheld.
+  Symlinks, hard links,
+  credential-like paths, provider homes, dependency environments, caches, live
+  control files, and `.git` objects are omitted. Sensitive exclusions are
+  not enumerated at all: the per-run bundle records neither their paths nor
+  their existence, class, count, sizes, hashes, or link targets.
+  Collection is bounded to 64 MiB per file, 512 MiB total, 50,000 examined
+  entries, 30 seconds, and a 256 MiB free-disk reserve. Repeated filesystem
+  failures are aggregated by error type instead of producing unbounded records.
+- Public DSI Slurm job bundles under `logs/dsi-slurm-artifacts/` follow the
+  same text-only and redaction policy; `job.json`, `.out`, and `.err` evidence
+  is eligible while binary or credential-bearing payloads remain excluded.
+- Documented Modal execution logs matching
+  `logs/modal_<kind>_<YYYYMMDD>_<HHMMSS>.log` are classified as public worker
+  evidence and pass through the same text sanitizer.
+- JSON and JSONL are redacted structurally. Free-form text and YAML-like
+  assignments redact common prefixed credential names such as
+  `OPENAI_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `client_secret`, and
+  `private_key`, together with configured environment credential values,
+  credential-bearing URIs, JSON Web Tokens, bearer tokens, nested sensitive
+  blocks, raw private-key blocks, and recognizable provider tokens. Direnv
+  sources and caches (`.envrc` and `.direnv/`) are never artifact sources.
+  References to credential, sealed-evaluation, privileged-runtime, and other
+  sensitive excluded paths inside otherwise-public traces are redacted by the
+  same eligibility policy. If detectable credential material remains after
+  sanitization, the whole file is withheld and collection is marked partial.
+  Configured credentials of at least
+  four characters are redacted exactly even without a recognizable provider
+  prefix. A shorter configured credential makes trace preparation fail closed
+  to a metadata-only result instead of risking broad or incomplete replacement.
+- The combined child stdout/stderr stream mixes public workers with privileged
+  runtime and evaluator events, so it is never forwarded or copied into the
+  public bundle. While the child is active, the parent retains the bounded raw
+  stream only in an unlinked mode-`0600` spool. After the child stops, the
+  parent materializes it in private, per-run, mode-`0700` scratch under
+  `/tmp/neurico-trace-scratch/<run-id>/`; scratch files use mode `0600`. New or
+  changed unclassified logs, generated binaries, and other
+  files that cannot enter the sanitized public bundle are retained there under
+  the same 64 MiB per-file and 512 MiB per-run limits. Known sealed,
+  evaluator-owned, credential-path, and private runtime locations are never
+  duplicated into scratch. Scratch is not mentioned in ACP messages or public
+  trace metadata and normally disappears when Harbor destroys the task
+  container. Manager history remains in NeuriCo's private `.neurico` state and
+  is not duplicated. Collection is final-state based: a workspace file that a
+  worker creates and deletes before the supervised process exits cannot be
+  recovered unless its content also appeared in stdout or a durable NeuriCo
+  log.
+- `workspace/snapshot.json` indexes preserved public text and aggregate public
+  exclusions; `collection.json` records collection policy and failures;
+  `run.json` records configuration and lifecycle outcome without child-output
+  payloads or payload-derived counts;
+  `manifest.json` hashes the completed bundle and labels collection as
+  `scope_complete`, `partial`, or `minimal`. Size, time, free-space, inventory, and
+  filesystem omissions make the status partial rather than silently claiming
+  completeness. `scope_complete` means only that classified public UTF-8 text
+  was completely collected; private manager history, mixed-authority stdout,
+  and sealed/runtime
+  material are named policy omissions rather than implied to be captured. A
+  new or changed unclassified log also makes collection partial without
+  revealing its path. Runtime inventory is limited to Python, platform,
+  NeuriCo, and adapter versions. Workspace Git provenance is limited to HEAD so hidden
+  material cannot affect dirty-state metadata. The adapter-source summary
+  additionally records dirty state and changed-entry count, without filenames,
+  subjects, or diffs. Private chain-of-thought that a provider does not emit is
+  not available to the adapter.
+- Trace preparation is observational. If credential redaction or the pre-run
+  inventory cannot be initialized safely, NeuriCo still runs normally and the
+  parent publishes only a metadata bundle identifying the trace-preflight
+  error. Per-file snapshot failures mark capture incomplete and are summarized
+  by type in `collection.json`; collection continues for other eligible files
+  unless a time or free-space limit is reached. If storage cannot be trusted or
+  even the metadata fallback cannot be published, the adapter emits a generic
+  trace-unavailable warning without changing the child exit result.
 - Harbor runs NeuriCo in embedded workspace mode. NeuriCo-owned dependency
   metadata and its virtual environment live under `neurico-research-env/`,
   while the task's root `.venv` is never read, reused, or removed by the

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 from pathlib import Path
 import signal
 import sys
@@ -26,11 +25,6 @@ from core.hitl_run_control import (  # noqa: E402
 from core.idea_manager import IdeaManager  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
 
-from .artifacts import (  # noqa: E402
-    DEFAULT_HARBOR_ARTIFACT_DIR,
-    capture_workspace_snapshot,
-    export_harbor_research_artifacts,
-)
 from .runtime import HarborAutoResearchTask, build_harbor_idea  # noqa: E402
 
 
@@ -60,8 +54,6 @@ def execute_autoresearch(
     ideas_dir: Path,
     iterations: int = 1,
     time_limit_seconds: int | None = None,
-    artifact_dir: Path | None = None,
-    requested_model: str | None = None,
 ) -> dict[str, Any]:
     """Submit a Harbor task through NeuriCo and run headless Auto HITL AutoResearch."""
     if iterations < 1:
@@ -71,46 +63,21 @@ def execute_autoresearch(
     ):
         raise ValueError("AutoResearch time limit must be a positive integer")
 
-    result: dict[str, Any] | None = None
-    error: BaseException | None = None
-    trace_capture_errors: list[dict[str, str]] = []
-    if artifact_dir is not None:
-        try:
-            capture_workspace_snapshot(
-                workspace=workspace,
-                artifact_dir=artifact_dir,
-                phase="input",
-            )
-        except Exception as snapshot_error:
-            trace_capture_errors.append(
-                {
-                    "phase": "input",
-                    "type": type(snapshot_error).__name__,
-                    "message": str(snapshot_error),
-                }
-            )
-            print(
-                "WARNING: NeuriCo could not capture the initial Harbor workspace "
-                f"snapshot: {snapshot_error}",
-                flush=True,
-            )
-    started_at = datetime.now(timezone.utc).isoformat()
-    started_monotonic = time.monotonic()
-    try:
-        task = HarborAutoResearchTask(instruction=instruction, workspace=workspace)
-        idea_manager = IdeaManager(ideas_dir)
-        idea_id = idea_manager.submit_idea(build_harbor_idea(task), validate=True)
+    task = HarborAutoResearchTask(instruction=instruction, workspace=workspace)
+    idea_manager = IdeaManager(ideas_dir)
+    idea_id = idea_manager.submit_idea(build_harbor_idea(task), validate=True)
 
-        # The idea metadata points at Harbor's existing repository, so the local
-        # runner selects it as the authoritative AutoResearch workspace. A direct
-        # runner invocation hosts the manager headlessly; "cli" selects the managed
-        # entry surface without starting a browser, while Auto mode forbids human
-        # escalation and lets the manager resolve every review boundary itself.
-        # NeuriCo owns the persisted deadline, stop propagation, and selected-node
-        # finalization. The adapter only translates its completed budget stop at the
-        # child-process boundary.
-        runner = ResearchRunner(use_github=False)
-        result = runner.run_research(
+    # The idea metadata points at Harbor's existing repository, so the local
+    # runner selects it as the authoritative AutoResearch workspace. A direct
+    # runner invocation hosts the manager headlessly; "cli" selects the managed
+    # entry surface without starting a browser, while Auto mode forbids human
+    # escalation and lets the manager resolve every review boundary itself.
+    # NeuriCo owns the persisted deadline, stop propagation, and selected-node
+    # finalization. The adapter only translates its completed budget stop at the
+    # child-process boundary.
+    runner = ResearchRunner(use_github=False)
+    try:
+        return runner.run_research(
             idea_id=idea_id,
             provider="codex",
             full_permissions=True,
@@ -126,55 +93,19 @@ def execute_autoresearch(
             time_limit_seconds=time_limit_seconds,
             workspace_mode="embedded",
         )
-        return result
     except HitlRunStopRequested as stop:
         if "budget_exhausted" not in str(stop):
-            error = stop
             raise
         print(
             "NeuriCo reached its native run-time limit and completed AutoResearch "
             "budget finalization in the Harbor workspace.",
             flush=True,
         )
-        result = {
+        return {
             "success": False,
             "stopped": True,
             "time_limit_reached": True,
         }
-        return result
-    except BaseException as exc:
-        error = exc
-        raise
-    finally:
-        if artifact_dir is not None:
-            try:
-                export_harbor_research_artifacts(
-                    workspace=workspace,
-                    artifact_dir=artifact_dir,
-                    project_root=_PROJECT_ROOT,
-                    instruction=instruction,
-                    run_configuration={
-                        "workflow": "autoresearch",
-                        "provider": "codex",
-                        "requested_model": requested_model,
-                        "hitl_mode": "auto",
-                        "scoring_enabled": True,
-                        "benchmark_mode": True,
-                        "autoresearch_iterations": iterations,
-                        "time_limit_seconds": time_limit_seconds,
-                        "workspace_mode": "embedded",
-                    },
-                    started_at=started_at,
-                    elapsed_seconds=time.monotonic() - started_monotonic,
-                    result=result,
-                    error=error,
-                    trace_capture_errors=trace_capture_errors,
-                )
-            except Exception as export_error:
-                print(
-                    f"WARNING: NeuriCo could not export Harbor trace artifacts: {export_error}",
-                    flush=True,
-                )
 
 
 def main() -> None:
@@ -184,8 +115,6 @@ def main() -> None:
     parser.add_argument("--ideas-dir", type=Path, required=True)
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--time-limit-seconds", type=int)
-    parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_HARBOR_ARTIFACT_DIR)
-    parser.add_argument("--requested-model")
     args = parser.parse_args()
 
     stop_requested = threading.Event()
@@ -210,8 +139,6 @@ def main() -> None:
             ideas_dir=args.ideas_dir,
             iterations=args.iterations,
             time_limit_seconds=args.time_limit_seconds,
-            artifact_dir=args.artifact_dir,
-            requested_model=args.requested_model,
         )
     finally:
         finished.set()
