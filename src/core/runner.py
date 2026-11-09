@@ -2255,6 +2255,12 @@ def main():
         "bootstrap mode only)",
     )
     parser.add_argument(
+        "--hitl-research",
+        choices=["web", "cli"],
+        default=None,
+        help="Run ordinary research through the HITL manager and audit workflow.",
+    )
+    parser.add_argument(
         "--hitl-autoresearch",
         choices=["web", "cli"],
         help="Run fresh AutoResearch through the HITL frontier, manager, and audit workflow.",
@@ -2383,6 +2389,7 @@ def main():
             hitl_bootstrap_autoresearch_baseline=args.hitl_bootstrap_autoresearch_baseline,
             proposer_timeout=args.proposer_timeout,
             compute_backend=args.compute_backend,
+            hitl_research=args.hitl_research,
             hitl_autoresearch=args.hitl_autoresearch,
             hitl_continue_autoresearch=args.hitl_continue_autoresearch,
             hitl_manager_port=args.hitl_manager_port,
