@@ -4714,6 +4714,28 @@ class HitlRuntimeState:
                         "Proposal preparation belongs to a different frontier node"
                     )
 
+            meeting = self._state.get("stage_planning_discussion")
+            if meeting is not None:
+                if not isinstance(action, dict) or not action:
+                    raise HitlRuntimeStateError(
+                        "Budget-ended planning discussion has no owning preparation action"
+                    )
+                recovery = action.get("recovery")
+                self._stage_planning_discussion_unlocked(
+                    owner={
+                        "kind": "additional_agent",
+                        "pipeline_stage": "resource_finder",
+                        "rollback_ref": (
+                            recovery.get("hitl_snapshot_ref", "")
+                            if isinstance(recovery, dict)
+                            else ""
+                        ),
+                        "parent_node_id": parent,
+                        "attempt_id": action.get("attempt_id", ""),
+                        "additional_agent_ordinal": action.get("additional_agent_ordinal"),
+                    }
+                )
+
             request_key = ""
             command = self._state.get("pending_worker_command")
             if (
@@ -4735,6 +4757,8 @@ class HitlRuntimeState:
 
             if isinstance(action, dict) and action:
                 self._state["next_autoresearch_action"] = None
+            if meeting is not None:
+                self._state["stage_planning_discussion"] = None
             self._save_unlocked()
             return request_key
 
