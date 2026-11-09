@@ -101,9 +101,9 @@ class HitlRunController:
         focus_supplied = "focused_autoresearch" in payload
         requested_focus = payload.get("focused_autoresearch", False)
         if type(requested_focus) is not bool:
-            raise ValueError("Focused AutoResearch must be true or false.")
-        if (operation != "research" or workflow != "autoresearch") and focus_supplied:
-            raise ValueError("Focused mode is supported only for AutoResearch.")
+            raise ValueError("Focused mode must be true or false.")
+        if operation != "research" and focus_supplied:
+            raise ValueError("Focused mode is supported only for research runs.")
         provider = str(payload.get("provider", "")).strip().lower()
         if provider not in {"claude", "codex"}:
             raise ValueError(
@@ -164,14 +164,14 @@ class HitlRunController:
             pipeline_exists = (
                 self.work_dir / ".neurico" / "pipeline_state.json"
             ).is_file()
-            if operation == "research" and workflow == "autoresearch":
+            if operation == "research":
                 if pipeline_exists:
                     focused_autoresearch = PipelineState.read_focused_autoresearch(
                         self.work_dir
                     )
                     if focus_supplied and requested_focus != focused_autoresearch:
                         raise RuntimeError(
-                            "This workspace already has a different focused AutoResearch setting."
+                            "This workspace already has a different focused-mode setting."
                         )
                 else:
                     focused_autoresearch = requested_focus
@@ -258,10 +258,11 @@ class HitlRunController:
             if operation == "construct_baseline":
                 request["write_paper"] = False
                 request["paper_style"] = None
-            elif workflow == "autoresearch":
-                request["iterations"] = iterations
-                request["time_limit_seconds"] = time_limit_seconds
+            else:
                 request["focused_autoresearch"] = focused_autoresearch
+                if workflow == "autoresearch":
+                    request["iterations"] = iterations
+                    request["time_limit_seconds"] = time_limit_seconds
             requests_dir = hitl_launch_requests_dir(ConfigLoader().get_workspace_parent_dir())
             requests_dir.mkdir(parents=True, exist_ok=True)
             request_path = requests_dir / f"request.{self.idea_id}.{request_id}.json"
@@ -285,7 +286,7 @@ class HitlRunController:
                         "provider": provider,
                         **(
                             {"focused_autoresearch": focused_autoresearch}
-                            if workflow == "autoresearch" and operation == "research"
+                            if operation == "research"
                             else {}
                         ),
                     },
@@ -326,7 +327,7 @@ class HitlRunController:
             "workflow": workflow,
             **(
                 {"focused_autoresearch": focused_autoresearch}
-                if workflow == "autoresearch" and operation == "research"
+                if operation == "research"
                 else {}
             ),
         }

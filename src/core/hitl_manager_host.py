@@ -1041,7 +1041,7 @@ class HitlTerminalChannel(UserChannel):
             iterations = 1
             time_limit_seconds = None
             focused_autoresearch = False
-            if operation == "research" and workflow == "autoresearch":
+            if operation == "research":
                 if bool(status.get("workflow_locked")):
                     focused_autoresearch = bool(
                         status.get("focused_autoresearch", False)
@@ -1058,6 +1058,7 @@ class HitlTerminalChannel(UserChannel):
                         default=False,
                         cancellable=True,
                     )
+            if operation == "research" and workflow == "autoresearch":
                 proposal_choice = self._read_choice(
                     "Proposals [single] (single/ranked/collaborative): ",
                     "single",
@@ -1148,10 +1149,14 @@ class HitlTerminalChannel(UserChannel):
                     "paper_style": paper_style,
                     "github": github,
                     **(
+                        {"focused_autoresearch": focused_autoresearch}
+                        if operation == "research"
+                        else {}
+                    ),
+                    **(
                         {
                             "iterations": iterations,
                             "time_limit_seconds": time_limit_seconds,
-                            "focused_autoresearch": focused_autoresearch,
                             "proposal_mode": proposal_mode,
                             **(
                                 {

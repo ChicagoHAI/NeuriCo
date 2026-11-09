@@ -1209,9 +1209,21 @@ class HitlManager:
             from core.pipeline_orchestrator import PipelineState
 
             focused_autoresearch = PipelineState.read_focused_autoresearch(self.work_dir)
+        focused_managed_ordinary = False
+        if (
+            not autoresearch_attempt
+            and not baseline_construction
+            and pipeline_stage in {"resource_finder", "experiment_runner"}
+        ):
+            from core.pipeline_orchestrator import PipelineState
+
+            focused_managed_ordinary = PipelineState.read_focused_managed_ordinary(
+                self.work_dir
+            )
         prompt = _load_hitl_template(
             "manager_review_raised_idea.txt",
             focused_autoresearch=focused_autoresearch,
+            focused_managed_ordinary=focused_managed_ordinary,
             parent_node_id=assigned_candidate_sha,
             pipeline_stage=pipeline_stage,
             requesting_actor=str(raised_idea.get("actor", "")).strip(),
@@ -1356,9 +1368,21 @@ class HitlManager:
             from core.pipeline_orchestrator import PipelineState
 
             focused_autoresearch = PipelineState.read_focused_autoresearch(self.work_dir)
+        focused_managed_ordinary = False
+        if (
+            not autoresearch_attempt
+            and not baseline_construction
+            and pipeline_stage in {"resource_finder", "experiment_runner"}
+        ):
+            from core.pipeline_orchestrator import PipelineState
+
+            focused_managed_ordinary = PipelineState.read_focused_managed_ordinary(
+                self.work_dir
+            )
         prompt = _load_hitl_template(
             "manager_review_phase_finish.txt",
             focused_autoresearch=focused_autoresearch,
+            focused_managed_ordinary=focused_managed_ordinary,
             parent_node_id=assigned_candidate_sha,
             pipeline_stage=pipeline_stage,
             hitl_stage=hitl_stage,

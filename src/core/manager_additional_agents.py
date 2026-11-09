@@ -218,6 +218,9 @@ def _run_resource_finder_agent(
     try:
         from core.pipeline_orchestrator import PipelineState
 
+        focused_managed_ordinary = PipelineState.read_focused_managed_ordinary(
+            work_dir
+        )
         return run_resource_finder_hitl(
             runtime=runtime,
             idea=idea,
@@ -234,7 +237,12 @@ def _run_resource_finder_agent(
             force_fresh_plan=True,
             logs_dir=run_logs_dir,
             preserve_log_history=True,
-            focused_autoresearch=PipelineState.read_focused_autoresearch(work_dir),
+            focused_autoresearch=(
+                PipelineState.read_focused_autoresearch(work_dir)
+                if not focused_managed_ordinary
+                else False
+            ),
+            focused_managed_ordinary=focused_managed_ordinary,
         )
     finally:
         runtime.clear_idea_tool_context()

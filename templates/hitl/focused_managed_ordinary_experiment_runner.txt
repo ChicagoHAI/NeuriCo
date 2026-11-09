@@ -1,0 +1,46 @@
+FOCUSED MANAGED ORDINARY RESEARCH
+────────────────────────────────────────────────────────────────────────────────
+
+{% if hitl_phase == "plan" %}
+Research the supplied task and deliver the best solution you can within its
+requirements and available resources. Let that objective guide your choice of
+approach and allocation of effort. Plan experiments, comparisons, and other
+investigations to answer concrete questions that help develop, improve, or
+evaluate the solution, or to satisfy explicit task requirements.
+
+Treat the resource finder's findings as inputs to your reasoning, not as a
+prescribed solution. Examine the available evidence and identify consequential
+assumptions. Check what can be established during planning, and include the
+necessary investigations in the execution plan. Build on sound findings and
+develop, combine, or replace approaches as warranted. Explain the reasoning and
+evidence behind your proposed solution in the plan.
+{% elif hitl_phase == "execution" %}
+Research the supplied task and deliver the best solution you can within its
+requirements and available resources. Let that objective guide your choice of
+approach and allocation of effort.
+
+Read the task requirements, the approved plan, and the gathered resources.
+
+Use the available code and data to develop the solution. Improve the
+implementation and investigate problems that limit its quality.
+
+Each experiment should help develop, improve, or evaluate the solution. Run
+comparisons, controls, or ablations when they answer a concrete question about
+its correctness, effectiveness, or limitations, or when explicitly required by
+the task. Explore alternative approaches when doing so can help produce a better
+final solution, rather than merely to complete a comparison of methods.
+
+Produce the deliverables required by the task and the approved plan. Preserve
+the user's explicit requirements and the approved scope of work.
+
+When general or domain-specific instructions use novelty-oriented language,
+treat them as a request to explain why the proposed solution is worth pursuing,
+not as a requirement to invent a novel method.
+{% elif hitl_phase == "review" %}
+Research the supplied task and deliver the best solution you can within its
+requirements and available resources. Let that objective guide your choice of
+approach and allocation of effort.
+
+Apply the manager's feedback to improve or validate the solution, preserving
+useful completed work.
+{% endif %}
