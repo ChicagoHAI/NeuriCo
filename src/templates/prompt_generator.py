@@ -1052,6 +1052,14 @@ RESEARCH DOMAIN:
         if background:
             research_context += "\nBACKGROUND INFORMATION:\n"
 
+            # Harbor keeps the complete task here; the hypothesis may be shortened.
+            if focused_managed_ordinary and background.get('description'):
+                research_context += (
+                    "\n### User-Provided Instructions and Context:\n\n"
+                    f">>> {background['description']} <<<\n\n"
+                    "(Note: Follow any specific instructions above with high priority)\n"
+                )
+
             if 'context' in background:
                 research_context += f"\nContext:\n{background['context']}\n"
 
