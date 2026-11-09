@@ -1482,10 +1482,12 @@ class HitlRuntime:
         use_hitl_autoresearch_whiteboard: bool = False,
         hitl_mode: HitlMode | str = HitlMode.FULL,
         tool_scope: Optional[str] = None,
+        restore_task_context: Optional[Callable[[], None]] = None,
     ):
         if pipeline_stage not in PIPELINE_STAGES:
             raise ValueError(f"Unsupported HITL pipeline stage: {pipeline_stage}")
         self.work_dir = Path(work_dir)
+        self._restore_task_context = restore_task_context
         self.pipeline_stage = pipeline_stage
         self.use_hitl_autoresearch_whiteboard = use_hitl_autoresearch_whiteboard
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
@@ -2548,6 +2550,8 @@ class HitlRuntime:
 
     def reload_manager_after_state_restore(self) -> None:
         """Refresh long-lived manager caches after private HITL rollback."""
+        if self._restore_task_context is not None:
+            self._restore_task_context()
         reloader = getattr(self.manager, "reload_after_runtime_restore", None)
         if callable(reloader):
             reloader()

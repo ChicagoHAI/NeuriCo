@@ -887,6 +887,8 @@ def construct_managed_baseline(
     selected_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     runtime_state = HitlRuntimeState(work_dir)
 
+    task_context = runtime_state.bind_task_context(idea)
+
     def restore_active_rule_maker_boundary() -> None:
         """Restore the inner managed-stage boundary before the outer workspace."""
         ResearchPipelineOrchestrator(
@@ -896,6 +898,7 @@ def construct_managed_baseline(
             baseline_construction=True,
             hitl_mode=selected_mode,
         ).restore_stopped_initial_run()
+        runtime_state.bind_task_context(task_context)
 
     existing_publication = runtime_state.initial_root_publication_transition()
     if isinstance(existing_publication, dict):
@@ -2474,7 +2477,9 @@ def continue_hitl_autoresearch(
     from core.hitl_runtime_state import HitlRuntimeState
 
     runtime_state = HitlRuntimeState(work_dir)
+    task_context = runtime_state.task_context() or idea
     recovery = recovered_attempt or recover_interrupted_hitl_attempt_if_needed(work_dir)
+    task_context = runtime_state.bind_task_context(task_context)
     selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     selected_proposal_mode = normalize_proposal_mode_config(proposal_mode_config)
     pending_worker_request = bool(
@@ -2536,6 +2541,7 @@ def continue_hitl_autoresearch(
     else:
         current_sha = selected_sha or checkpoints.current_sha()
 
+    runtime_state.bind_task_context(task_context)
     if iterations == 0 and (
         pending_worker_request
         or pending_frontier_transition
@@ -2639,11 +2645,14 @@ class HitlAutoResearchController:
         self.idea = idea
         self.idea_id = idea_id
         self.work_dir = Path(work_dir)
+        self._task_context = HitlRuntimeState(self.work_dir).bind_task_context(idea)
         self.checkpoints = checkpoint_manager or CheckpointManager(self.work_dir)
         self.history = history_manager or AttemptHistoryManager(history_root, idea_id)
         self.proposal_generator = proposal_generator
         self.scorer = scorer
         self.hitl_runtime = hitl_runtime
+        if self.hitl_runtime is not None:
+            self.hitl_runtime._restore_task_context = self._restore_task_context
         # Rollback replaces attempt-local runtime wrappers, not the run-owned
         # manager and channel that were injected by the launcher.
         self._hitl_run_binding = (
@@ -6530,6 +6539,7 @@ class HitlAutoResearchController:
         return build
 
     def _proposal_hitl_runtime(self) -> HitlRuntime:
+        self._restore_task_context()
         if self.hitl_runtime is None:
             binding = getattr(self, "_hitl_run_binding", None)
             self.hitl_runtime = HitlRuntime(
@@ -6539,11 +6549,18 @@ class HitlAutoResearchController:
                 channel=binding[1] if binding is not None else None,
                 use_hitl_autoresearch_whiteboard=True,
                 hitl_mode=self.hitl_mode,
+                restore_task_context=self._restore_task_context,
             )
         return self.hitl_runtime
 
+    def _restore_task_context(self) -> None:
+        self._task_context = HitlRuntimeState(self.work_dir).bind_task_context(
+            self._task_context
+        )
+
     def _reload_manager_after_hitl_restore(self) -> None:
         """Remove failed-attempt context from a surviving manager instance."""
+        self._restore_task_context()
         if self.hitl_runtime is not None:
             reloader = getattr(self.hitl_runtime, "reload_manager_after_state_restore", None)
             if callable(reloader):
@@ -6866,6 +6883,7 @@ def run_hitl_autoresearch_loop(
             idea=idea,
         )
 
+    HitlRuntimeState(work_dir).bind_task_context(idea)
     experiment_runtime = HitlRuntime(
         work_dir,
         "experiment_runner",

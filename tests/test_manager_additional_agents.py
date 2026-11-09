@@ -1638,6 +1638,8 @@ def test_preparation_without_candidate_marker_reaches_iteration_loop(tmp_path):
 
     controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
     controller.hitl_runtime = FakeRuntime()
+    controller.work_dir = tmp_path
+    controller._task_context = state.bind_task_context({"idea": {"title": "Task"}})
 
     assert controller._resume_frontier_boundary_if_needed() is None
 

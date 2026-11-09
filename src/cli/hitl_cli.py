@@ -12,7 +12,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from cli.hitl_launcher import HitlRunController, workspace_for_idea  # noqa: E402
+from cli.hitl_launcher import HitlRunController, initialize_manager_task, workspace_for_idea  # noqa: E402
 from core.hitl_manager_host import (  # noqa: E402
     HitlManagerHost,
     HitlTerminalChannel,
@@ -50,6 +50,7 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    initialize_manager_task(PROJECT_ROOT, args.idea_id, work_dir)
     host.start()
     notifications_stopped = threading.Event()
 

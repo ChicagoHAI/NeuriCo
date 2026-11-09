@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 import yaml
 
-from cli.hitl_launcher import HitlRunController, workspace_for_idea
+from cli.hitl_launcher import HitlRunController, initialize_manager_task, workspace_for_idea
 from core.config_loader import ConfigLoader
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_manager_host import HitlManagerHost, HitlWebChannel
@@ -148,6 +148,7 @@ class HitlWebWorkspaceSession:
             interface="web",
             on_status_change=lambda _status: publish_run_status(),
         )
+        initialize_manager_task(project_root, idea_id, self.work_dir)
         self.host.start()
 
     @property

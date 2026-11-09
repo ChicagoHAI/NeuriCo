@@ -121,6 +121,7 @@ class HitlRuntimeState:
     @staticmethod
     def _default() -> Dict[str, Any]:
         return {
+            "task_context": None,
             "manager_provider": "",
             "worker_continuation": None,
             "pending_worker_command": None,
@@ -296,6 +297,37 @@ class HitlRuntimeState:
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             return self._copy(self._state)
+
+    def task_context(self) -> Optional[Dict[str, Any]]:
+        """Return the complete runtime-bound task, independently of research history."""
+        return self.snapshot().get("task_context")
+
+    def bind_task_context(
+        self, idea: Dict[str, Any], *, prepare_run: bool = False
+    ) -> Dict[str, Any]:
+        """Initialize context, or refresh it at run preparation unless review is held.
+
+        Nested workers and recovery use the default initialize-only behavior.
+        The returned copy is the binding the owning workflow must retain across
+        rollback, which may differ from its newly loaded idea on resume.
+        """
+        from core.compute_backend import without_runtime_compute_backend
+        from core.local_resources import workspace_contract_copy
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            saved = self._state.get("task_context")
+            held = (
+                worker_command_requires_resume(self._state.get("pending_worker_command"))
+                or bool(self._state.get("worker_continuation"))
+                or bool(self._state.get("next_autoresearch_action"))
+                or bool(self._state.get("frontier_decision_transition"))
+            )
+            if saved is None or (prepare_run and not held):
+                saved = workspace_contract_copy(without_runtime_compute_backend(idea))
+                self._state["task_context"] = self._copy(saved)
+                self._save_unlocked()
+            return self._copy(saved)
 
     def manager_provider(self) -> str:
         """Return the workspace's selected manager backend, if configured."""

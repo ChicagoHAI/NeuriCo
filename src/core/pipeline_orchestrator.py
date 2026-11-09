@@ -484,6 +484,14 @@ class ResearchPipelineOrchestrator:
         self.hitl_channel = hitl_channel
         self.hitl_manager_config = hitl_manager_config or {}
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
+        self._task_context: Optional[Dict[str, Any]] = None
+
+    def _bind_task_context(self, idea: Dict[str, Any]) -> None:
+        self._task_context = HitlRuntimeState(self.work_dir).bind_task_context(idea)
+
+    def _restore_task_context(self) -> None:
+        if self._task_context is not None:
+            self._bind_task_context(self._task_context)
 
     def _managed_initial_stages(self) -> tuple[str, ...]:
         """Return stages that belong to this managed initial workflow."""
@@ -494,6 +502,7 @@ class ResearchPipelineOrchestrator:
         return ("resource_finder", "experiment_runner")
 
     def _create_hitl_runtime(self, pipeline_stage: str) -> HitlRuntime:
+        self._restore_task_context()
         whiteboard_mode: Dict[str, bool] = {}
         if self.hitl_autoresearch:
             whiteboard_mode["use_hitl_autoresearch_whiteboard"] = True
@@ -502,6 +511,7 @@ class ResearchPipelineOrchestrator:
                 self.work_dir,
                 pipeline_stage,
                 hitl_mode=self.hitl_mode,
+                restore_task_context=self._restore_task_context,
                 **whiteboard_mode,
             )
         return HitlRuntime(
@@ -511,6 +521,7 @@ class ResearchPipelineOrchestrator:
             channel=self.hitl_channel,
             config=self.hitl_manager_config,
             hitl_mode=self.hitl_mode,
+            restore_task_context=self._restore_task_context,
             **whiteboard_mode,
         )
 
@@ -1077,8 +1088,11 @@ class ResearchPipelineOrchestrator:
                 scorer_timeout=scorer_timeout,
             )
 
+        if hitl_enabled:
+            self._bind_task_context(idea)
         if self.managed_initial_run and hitl_enabled:
             self.prepare_initial_resume()
+            self._restore_task_context()
 
         print()
         print("=" * 80)
@@ -3143,6 +3157,7 @@ class ResearchPipelineOrchestrator:
             raise RuntimeError(
                 "Managed baseline construction requires baseline_construction=True."
             )
+        self._bind_task_context(idea)
         if str(self.state.state.get("workflow", "")).strip().lower() != "ordinary" or not bool(
             self.state.state.get("completed")
         ):
