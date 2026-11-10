@@ -22,8 +22,9 @@ import threading
 import secrets
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
+from core.hitl_discussion import MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_paths import (
@@ -116,6 +117,7 @@ _RANKED_COMMAND_PROFILES = {
 }
 _DISCUSSION_COMMAND_PROFILES = {
     "proposal_discussion_turn": {
+        "discussion_kind": "proposal",
         "actor": "autoresearch_proposer",
         "hitl_stage": "proposal",
         "discussion_phases": frozenset({"initial", "opening", "response"}),
@@ -128,6 +130,7 @@ _DISCUSSION_COMMAND_PROFILES = {
         },
     },
     "proposal_discussion_decision": {
+        "discussion_kind": "proposal",
         "actor": "autoresearch_proposer",
         "hitl_stage": "proposal",
         "discussion_phases": frozenset({"decision"}),
@@ -139,8 +142,35 @@ _DISCUSSION_COMMAND_PROFILES = {
             "hitl-decide-discussion",
         },
     },
+    "planning_discussion_turn": {
+        "discussion_kind": "planning",
+        "actors": frozenset(
+            {"comment_handler", "resource_finder", "rule_maker", "experiment_runner"}
+        ),
+        "hitl_stage": "plan",
+        "discussion_phases": frozenset({"initial", "opening", "response"}),
+        "commands": {
+            "hitl-view-ideas",
+            "hitl-report-idea",
+            "hitl-view-discussion",
+            "hitl-finish-discussion-turn",
+        },
+    },
+    "planning_discussion_decision": {
+        "discussion_kind": "planning",
+        "actors": frozenset(
+            {"comment_handler", "resource_finder", "rule_maker", "experiment_runner"}
+        ),
+        "hitl_stage": "plan",
+        "discussion_phases": frozenset({"decision"}),
+        "commands": {
+            "hitl-view-ideas",
+            "hitl-report-idea",
+            "hitl-view-discussion",
+            "hitl-decide-discussion",
+        },
+    },
 }
-MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS = 2_000
 
 
 def _closed_scoped_task_profile_spec(profile: Any) -> Optional[Dict[str, Any]]:
@@ -507,24 +537,41 @@ def visible_discussion_idea_records(
     candidate_attempt_id: str,
     discussion_turn_id: str,
     discussion_state: Dict[str, Any],
+    actor: str = "autoresearch_proposer",
+    pipeline_stage: str = "",
+    hitl_stage: str = "proposal",
+    discussion_kind: str = "proposal",
     seed_idea_ids: Iterable[str] = (),
 ) -> List[Dict[str, Any]]:
     """Derive one collaborative turn's visible records from the idea log."""
 
-    from core.hitl_proposal_discussion import (
-        published_proposal_discussion_task_ids,
-        validate_proposal_discussion_task_id,
-    )
+    if discussion_kind == "proposal":
+        from core.hitl_proposal_discussion import (
+            published_proposal_discussion_task_ids as published_task_ids,
+        )
+        from core.hitl_proposal_discussion import (
+            validate_proposal_discussion_task_id as validate_task_id,
+        )
+    elif discussion_kind == "planning":
+        from core.hitl_planning_discussion import (
+            published_planning_discussion_task_ids as published_task_ids,
+        )
+        from core.hitl_planning_discussion import (
+            validate_planning_discussion_task_id as validate_task_id,
+        )
+    else:
+        raise HitlValidationError("Discussion idea visibility has an invalid kind.")
 
-    if not str(parent_node_id).strip() or not str(candidate_attempt_id).strip():
+    has_parent = bool(str(parent_node_id).strip())
+    has_attempt = bool(str(candidate_attempt_id).strip())
+    if has_parent != has_attempt:
         raise HitlValidationError(
-            "Discussion idea visibility requires parent and attempt identity."
+            "Discussion idea visibility requires both parent and attempt identity or neither."
         )
     if not isinstance(discussion_state, dict):
         raise HitlValidationError("Discussion idea visibility requires meeting state.")
-    if str(discussion_state.get("candidate_attempt_id", "")) != str(
-        candidate_attempt_id
-    ):
+    physical_attempt = str(discussion_state.get("candidate_attempt_id", "")).strip()
+    if physical_attempt and physical_attempt != str(candidate_attempt_id):
         raise HitlValidationError(
             "Discussion idea visibility does not match its physical attempt."
         )
@@ -540,14 +587,12 @@ def visible_discussion_idea_records(
     participant_count = discussion_state.get("participant_count")
     max_response_rounds = discussion_state.get("max_response_rounds")
     try:
-        current_turn = validate_proposal_discussion_task_id(
+        current_turn = validate_task_id(
             discussion_turn_id,
             participant_count=participant_count,
             max_response_rounds=max_response_rounds,
         )
-        published_turn_ids = set(
-            published_proposal_discussion_task_ids(discussion_state)
-        )
+        published_turn_ids = set(published_task_ids(discussion_state))
     except ValueError as exc:
         raise HitlValidationError(str(exc)) from exc
     tasks = discussion_state.get("tasks")
@@ -573,15 +618,21 @@ def visible_discussion_idea_records(
     published_ids: set[str] = set()
     for idea_id, record in records_by_id.items():
         if (
-            str(record.get("parent_node_id", "")) != str(parent_node_id)
-            or str(record.get("attempt_id", "")) != str(candidate_attempt_id)
+            (has_parent and str(record.get("parent_node_id", "")) != str(parent_node_id))
+            or (has_attempt and str(record.get("attempt_id", "")) != str(candidate_attempt_id))
+            or str(record.get("actor", "")) != str(actor)
+            or str(record.get("hitl_stage", "")) != str(hitl_stage)
+            or (
+                str(pipeline_stage).strip()
+                and str(record.get("pipeline_stage", "")) != str(pipeline_stage)
+            )
         ):
             continue
         record_turn_id = str(record.get("discussion_turn_id", "")).strip()
         if not record_turn_id or record_turn_id not in tasks:
             continue
         try:
-            record_turn = validate_proposal_discussion_task_id(
+            record_turn = validate_task_id(
                 record_turn_id,
                 participant_count=participant_count,
                 max_response_rounds=max_response_rounds,
@@ -758,9 +809,14 @@ def render_hitl_template(name: str, **kwargs: Any) -> str:
 
 
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
+    raw = response.strip()
+    if raw == "CUSTOM":
+        return {"decision": "CUSTOM", "feedback": raw}
     resolved = _resolve_option_decision(response, options)
     if resolved["decision"] == "CUSTOM":
-        raise HitlValidationError("Manager-resolved decision must match a substantive option")
+        raise HitlValidationError(
+            "Manager-resolved decision must match a substantive option or explicitly use CUSTOM"
+        )
     return resolved
 
 
@@ -969,6 +1025,32 @@ class HitlIdeaLog:
         if not self.path.exists():
             return []
         return read_jsonl(self.path)
+
+    @staticmethod
+    def premise_closure(
+        records: Iterable[Dict[str, Any]],
+        *,
+        seed_idea_ids: Iterable[str],
+    ) -> List[Dict[str, Any]]:
+        """Resolve finalized seeds and their premises in seed-first order."""
+        records_by_id = {
+            str(record.get("idea_id", "")).strip(): record for record in records
+        }
+        pending = _normalize_premises(list(seed_idea_ids))
+        seen: set[str] = set()
+        result: List[Dict[str, Any]] = []
+        for idea_id in pending:
+            if idea_id in seen:
+                continue
+            record = records_by_id.get(idea_id)
+            if record is None:
+                raise HitlValidationError(
+                    "Idea premise closure references an unavailable finalized idea."
+                )
+            seen.add(idea_id)
+            result.append(dict(record))
+            pending.extend(_normalize_premises(record.get("premises")))
+        return result
 
     def render_for_agent(
         self,
@@ -1204,21 +1286,33 @@ class HitlIdeaLog:
                 "Proposal verifier and reviewer ideas require proposal_task_id provenance."
             )
         if discussion_turn_id:
-            from core.hitl_proposal_discussion import (
-                parse_proposal_discussion_task_id,
-            )
+            from core.hitl_discussion import parse_discussion_task_id
 
             try:
-                parse_proposal_discussion_task_id(discussion_turn_id)
+                parse_discussion_task_id(discussion_turn_id)
             except ValueError as exc:
                 raise HitlValidationError(str(exc)) from exc
-            if actor != "autoresearch_proposer":
+            discussion_actor_stage = (actor, str(record.get("hitl_stage", "")))
+            if discussion_actor_stage not in {
+                ("autoresearch_proposer", "proposal"),
+                ("comment_handler", "plan"),
+                ("resource_finder", "plan"),
+                ("rule_maker", "plan"),
+                ("experiment_runner", "plan"),
+            }:
+                if record.get("hitl_stage") == "proposal":
+                    raise HitlValidationError(
+                        "Discussion turn provenance requires the autoresearch proposer "
+                        "actor."
+                    )
                 raise HitlValidationError(
-                    "Discussion turn provenance requires the autoresearch proposer actor."
+                    "Planning discussion turn provenance requires a recognized planning "
+                    "actor at the plan stage."
                 )
-            if not str(record.get("parent_node_id", "")).strip() or not str(
-                record.get("attempt_id", "")
-            ).strip():
+            if actor in {"autoresearch_proposer", "comment_handler"} and (
+                not str(record.get("parent_node_id", "")).strip()
+                or not str(record.get("attempt_id", "")).strip()
+            ):
                 raise HitlValidationError(
                     "Discussion turn provenance requires parent_node_id and attempt_id."
                 )
@@ -1463,6 +1557,24 @@ def log_frontier_decision_record(
     return log.append(record, idempotent=True)
 
 
+def compose_hitl_worker_prompt(
+    worker_prompt_contexts: Optional[Mapping[str, Any]],
+    *,
+    hitl_stage: str,
+    phase_prompt: str,
+) -> str:
+    """Join one existing stage source context with its HITL phase contract."""
+
+    if not worker_prompt_contexts:
+        return str(phase_prompt)
+    source_context = str(worker_prompt_contexts.get(hitl_stage, "")).strip()
+    if not source_context:
+        raise HitlValidationError(
+            f"HITL worker prompt context is missing for phase {hitl_stage!r}."
+        )
+    return f"{source_context}\n\n{str(phase_prompt).strip()}\n"
+
+
 class HitlRuntime:
     """Small orchestration helper for one plan-centered HITL stage."""
 
@@ -1539,9 +1651,13 @@ class HitlRuntime:
 
         return HitlManager(config, work_dir=work_dir, channel=channel)
 
-    def _autoresearch_candidate_prompt_context(self) -> Dict[str, Any]:
-        provenance = self._tool_context.get("provenance")
-        if not isinstance(provenance, dict):
+    def _autoresearch_candidate_prompt_context(
+        self,
+        provenance: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if provenance is None:
+            provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, Mapping):
             provenance = {}
         assigned_candidate_sha = str(provenance.get("parent_node_id", "")).strip()
         autoresearch_attempt = bool(
@@ -1566,6 +1682,7 @@ class HitlRuntime:
         approved_proposal: str = "",
         *,
         requires_human_approval: Optional[bool] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
     ) -> str:
         if requires_human_approval is None:
             requires_human_approval = self.requires_human_plan_approval
@@ -1581,7 +1698,7 @@ class HitlRuntime:
             hitl_stage="plan",
             allow_raised_ideas=False,
             hitl_mode=self.hitl_mode.value,
-            **self._autoresearch_candidate_prompt_context(),
+            **self._autoresearch_candidate_prompt_context(provenance),
         )
 
     def execution_prompt_block(self, mode: str = "execute", feedback: str = "") -> str:
@@ -1635,15 +1752,11 @@ class HitlRuntime:
         that do not have an external stage-worker source prompt keep their
         dedicated prompt contract unchanged.
         """
-        contexts = self._tool_context.get("worker_prompt_contexts")
-        if not contexts:
-            return phase_prompt
-        source_context = str(contexts.get(hitl_stage, "")).strip()
-        if not source_context:
-            raise HitlValidationError(
-                f"HITL worker prompt context is missing for phase {hitl_stage!r}."
-            )
-        return f"{source_context}\n\n{phase_prompt.strip()}\n"
+        return compose_hitl_worker_prompt(
+            self._tool_context.get("worker_prompt_contexts"),
+            hitl_stage=hitl_stage,
+            phase_prompt=phase_prompt,
+        )
 
     def proposal_replacement_prompt_block(self, feedback: str) -> str:
         return _load_hitl_template(
@@ -1710,58 +1823,16 @@ class HitlRuntime:
         finalized: Dict[str, Dict[str, Any]] = {}
 
         def persist_resolution(review: Dict[str, Any]) -> Dict[str, Any]:
-            decision_options = self._raised_idea_decision_options(raised_idea, review)
-            level = str(review.get("level", "")).strip()
-            actor = str(review.get("actor", "")).strip()
-            if (level, actor) not in {("B", "manager"), ("A", "human")}:
-                raise HitlValidationError(
-                    "Manager raised-idea resolution must finalize as B/manager or A/human."
-                )
-            feedback = _require_text(
-                review.get("manager_feedback"),
-                "manager_feedback",
-                "Manager raised-idea resolution",
-            )
-            if raised_idea["idea_type"] == "decision":
-                raw_decision = _require_text(
-                    review.get("decision"),
-                    "decision",
-                    "Finalized raised decision idea",
-                )
-                decision = (
-                    _resolve_option_decision(raw_decision, decision_options)["decision"]
-                    if actor == "human"
-                    else _resolve_manager_option(raw_decision, decision_options)["decision"]
-                )
-            else:
-                decision = str(review.get("decision", feedback)).strip()
-
-            extra: Dict[str, Any] = {"manager_feedback": feedback}
-            if actor == "human":
-                extra["human_feedback"] = _require_text(
-                    review.get("human_feedback"),
-                    "human_feedback",
-                    "Human-resolved raised idea",
-                )
-                extra["manager_escalation_reason"] = str(
-                    review.get("manager_escalation_reason", "")
-                ).strip()
-            if raised_idea["idea_type"] == "decision":
-                extra["options"] = decision_options
-
-            record = self._record_from_raised_idea(
+            record = self._raised_resolution_record(
                 raised_idea=raised_idea,
-                level=level,
-                actor=actor,
-                decision=decision,
-                manager_context=str(review.get("context", raised_idea.get("context", ""))),
-                extra=extra,
+                review=review,
+                provenance=provenance,
+                decision_options=self._raised_idea_decision_options(raised_idea),
             )
-            _apply_runtime_provenance(record, provenance)
             finalized["record"] = self.log.append(record, idempotent=True)
-            return review
+            return {**review, "idea_id": finalized["record"]["idea_id"]}
 
-        self.manager.review_raised_idea(
+        review = self.manager.review_raised_idea(
             pipeline_stage=self.pipeline_stage,
             raised_idea=raised_idea,
             plan_text=self._read_optional(self.paths.plan_path),
@@ -1776,12 +1847,116 @@ class HitlRuntime:
                 self._tool_context.get("baseline_candidate_manifest") or {}
             ),
         )
-        try:
-            return finalized["record"]
-        except KeyError as exc:
-            raise RuntimeError(
-                "Raised HITL worker request finalized without an audit record."
-            ) from exc
+        if "record" not in finalized:
+            return self._recover_raised_resolution(raised_idea, review)
+        return finalized["record"]
+
+    def _recover_raised_resolution(
+        self,
+        raised_idea: Dict[str, Any],
+        review: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Read the finalized record for a resolved request without appending."""
+        if "idea_id" in review:
+            idea_id = _require_text(review.get("idea_id"), "idea_id", "Resolved raised request")
+            record = self._idea_record_by_id(idea_id)
+            if record is None:
+                raise HitlValidationError(
+                    f"Resolved raised request refers to missing finalized idea {idea_id}."
+                )
+            return record
+
+        pending = self._pending_worker_command()
+        if (
+            not isinstance(pending, dict)
+            or pending.get("kind") != "raised_idea"
+            or pending.get("status") != "resolved"
+            or pending.get("raised_idea") != raised_idea
+        ):
+            raise HitlValidationError("No matching resolved raised request exists for replay.")
+        saved_idea = pending["raised_idea"]
+        provenance = (
+            pending.get("provenance")
+            if "provenance" in pending
+            else _runtime_provenance(saved_idea)
+        )
+        # Older Full-HITL finalizations could store manager-rewritten options.
+        # Reconstruct that historical representation only to find its record.
+        decision_options = (
+            _validate_substantive_options(
+                review.get("options", saved_idea.get("options")),
+                error_prefix="Manager-reviewed decision",
+            )
+            if saved_idea["idea_type"] == "decision"
+            else []
+        )
+        expected = self._raised_resolution_record(
+            raised_idea=saved_idea,
+            review=review,
+            provenance=provenance,
+            decision_options=decision_options,
+        )
+        record = self.log.find_equivalent(expected)
+        if record is None:
+            raise HitlValidationError("Resolved raised request has no matching finalized idea.")
+        return record
+
+    def _raised_resolution_record(
+        self,
+        *,
+        raised_idea: Dict[str, Any],
+        review: Dict[str, Any],
+        provenance: Optional[Dict[str, Any]],
+        decision_options: List[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        level = str(review.get("level", "")).strip()
+        actor = str(review.get("actor", "")).strip()
+        if (level, actor) not in {("B", "manager"), ("A", "human")}:
+            raise HitlValidationError(
+                "Manager raised-idea resolution must finalize as B/manager or A/human."
+            )
+        feedback = _require_text(
+            review.get("manager_feedback"),
+            "manager_feedback",
+            "Manager raised-idea resolution",
+        )
+        if raised_idea["idea_type"] == "decision":
+            raw_decision = _require_text(
+                review.get("decision"),
+                "decision",
+                "Finalized raised decision idea",
+            )
+            decision = (
+                _resolve_option_decision(raw_decision, decision_options)["decision"]
+                if actor == "human"
+                else _resolve_manager_option(raw_decision, decision_options)["decision"]
+            )
+        else:
+            decision = str(review.get("decision", feedback)).strip()
+
+        extra: Dict[str, Any] = {"manager_feedback": feedback}
+        if actor == "human":
+            extra["human_feedback"] = _require_text(
+                review.get("human_feedback"),
+                "human_feedback",
+                "Human-resolved raised idea",
+            )
+            extra["manager_escalation_reason"] = str(
+                review.get("manager_escalation_reason", "")
+            ).strip()
+        if raised_idea["idea_type"] == "decision":
+            extra["options"] = decision_options
+
+        record = self._record_from_raised_idea(
+            raised_idea=raised_idea,
+            level=level,
+            actor=actor,
+            decision=decision,
+            manager_context=str(review.get("context", raised_idea.get("context", ""))),
+            extra=extra,
+        )
+        _apply_runtime_provenance(record, provenance)
+        return record
 
     def prepare_idea_tool_context(
         self,
@@ -1804,7 +1979,15 @@ class HitlRuntime:
         baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
         proposal_preparation_attempt_id: Optional[str] = None,
         proposal_discussion_attempt_dir: Optional[Path] = None,
+        planning_discussion_attempt_dir: Optional[Path] = None,
+        planning_discussion_record_dir: Optional[Path] = None,
+        planning_discussion_stage_owner: Optional[Dict[str, Any]] = None,
         proposal_discussion_final_owner: bool = False,
+        planning_discussion_final_owner: bool = False,
+        planning_discussion_prompt_composer: Optional[Callable[..., str]] = None,
+        planning_discussion_reopen_capacity_validator: Optional[
+            Callable[[Dict[str, Any]], None]
+        ] = None,
         scoped_task_cancel_event: Optional[threading.Event] = None,
     ) -> None:
         if hitl_stage not in HITL_STAGES:
@@ -1817,11 +2000,83 @@ class HitlRuntime:
         normalized_provenance = dict(provenance or {})
         normalized_preparation_attempt_id = str(proposal_preparation_attempt_id or "").strip()
         normalized_discussion_final_owner = bool(proposal_discussion_final_owner)
-        normalized_discussion_attempt_dir = (
+        normalized_planning_final_owner = bool(planning_discussion_final_owner)
+        if normalized_discussion_final_owner and normalized_planning_final_owner:
+            raise HitlValidationError(
+                "One worker cannot own proposal and planning discussion final writing."
+            )
+        normalized_proposal_discussion_attempt_dir = (
             Path(proposal_discussion_attempt_dir).resolve()
             if proposal_discussion_attempt_dir is not None
             else None
         )
+        normalized_planning_discussion_attempt_dir = (
+            Path(planning_discussion_attempt_dir).resolve()
+            if planning_discussion_attempt_dir is not None
+            else None
+        )
+        normalized_planning_discussion_record_dir = (
+            Path(planning_discussion_record_dir).resolve()
+            if planning_discussion_record_dir is not None
+            else None
+        )
+        if planning_discussion_stage_owner is None:
+            normalized_planning_stage_owner = None
+        else:
+            from core.hitl_planning_discussion import (
+                normalize_stage_planning_discussion_owner,
+            )
+
+            try:
+                normalized_planning_stage_owner = (
+                    normalize_stage_planning_discussion_owner(
+                        planning_discussion_stage_owner
+                    )
+                )
+            except ValueError as exc:
+                raise HitlValidationError(str(exc)) from exc
+        if (
+            normalized_planning_stage_owner is not None
+            and normalized_planning_discussion_attempt_dir is not None
+        ):
+            raise HitlValidationError(
+                "Planning discussion tools cannot bind candidate and stage state together."
+            )
+        if (
+            normalized_planning_stage_owner is None
+            and normalized_planning_discussion_record_dir is not None
+        ):
+            raise HitlValidationError(
+                "A stage planning record directory requires its stage owner."
+            )
+        stage_owner_provenance_matches = False
+        if normalized_planning_stage_owner is not None:
+            if normalized_planning_stage_owner["kind"] == "initial_stage":
+                stage_owner_provenance_matches = not any(
+                    str(normalized_provenance.get(key, "")).strip()
+                    for key in (
+                        "parent_node_id",
+                        "attempt_id",
+                        "additional_agent_ordinal",
+                    )
+                )
+            else:
+                stage_owner_provenance_matches = all(
+                    (
+                        str(normalized_provenance.get("parent_node_id", "")).strip()
+                        == str(normalized_planning_stage_owner["parent_node_id"]),
+                        str(normalized_provenance.get("attempt_id", "")).strip()
+                        == str(normalized_planning_stage_owner["attempt_id"]),
+                        str(
+                            normalized_provenance.get("additional_agent_ordinal", "")
+                        ).strip()
+                        == str(
+                            normalized_planning_stage_owner[
+                                "additional_agent_ordinal"
+                            ]
+                        ),
+                    )
+                )
         if profile == "default":
             if self.tool_scope is not None or idea_visibility is not None or scoped_task_cancel_event is not None:
                 raise HitlValidationError(
@@ -1833,16 +2088,57 @@ class HitlRuntime:
                     or hitl_stage != "proposal"
                     or normalized_actor != "autoresearch_proposer"
                     or not normalized_preparation_attempt_id
-                    or normalized_discussion_attempt_dir is None
+                    or normalized_proposal_discussion_attempt_dir is None
+                    or normalized_planning_discussion_attempt_dir is not None
                     or not str(normalized_provenance.get("parent_node_id", "")).strip()
                     or not str(normalized_provenance.get("attempt_id", "")).strip()
-                    or normalized_discussion_attempt_dir.name
+                    or normalized_proposal_discussion_attempt_dir.name
                     != str(normalized_provenance.get("attempt_id", "")).strip()
                 ):
                     raise HitlValidationError(
                         "Collaborative final-owner tools require their proposal discussion identity."
                     )
-            elif normalized_preparation_attempt_id or normalized_discussion_attempt_dir is not None:
+            elif normalized_planning_final_owner:
+                candidate_owner = normalized_planning_stage_owner is None
+                valid_candidate_owner = bool(
+                    candidate_owner
+                    and self.pipeline_stage == "experiment_runner"
+                    and normalized_actor == "comment_handler"
+                    and normalized_preparation_attempt_id
+                    and normalized_planning_discussion_attempt_dir is not None
+                    and normalized_planning_discussion_record_dir is None
+                    and str(normalized_provenance.get("parent_node_id", "")).strip()
+                    and str(normalized_provenance.get("attempt_id", "")).strip()
+                    and str(normalized_provenance.get("proposal_idea_id", "")).strip()
+                    and normalized_planning_discussion_attempt_dir.name
+                    == str(normalized_provenance.get("attempt_id", "")).strip()
+                )
+                valid_stage_owner = bool(
+                    not candidate_owner
+                    and normalized_planning_stage_owner is not None
+                    and self.pipeline_stage
+                    == normalized_planning_stage_owner["pipeline_stage"]
+                    and normalized_actor == self.pipeline_stage
+                    and not normalized_preparation_attempt_id
+                    and normalized_planning_discussion_attempt_dir is None
+                    and normalized_planning_discussion_record_dir is not None
+                    and stage_owner_provenance_matches
+                )
+                if (
+                    hitl_stage != "plan"
+                    or normalized_proposal_discussion_attempt_dir is not None
+                    or not (valid_candidate_owner or valid_stage_owner)
+                ):
+                    raise HitlValidationError(
+                        "Collaborative plan-owner tools require their planning discussion identity."
+                    )
+            elif (
+                normalized_preparation_attempt_id
+                or normalized_proposal_discussion_attempt_dir is not None
+                or normalized_planning_discussion_attempt_dir is not None
+                or normalized_planning_discussion_record_dir is not None
+                or normalized_planning_stage_owner is not None
+            ):
                 raise HitlValidationError(
                     "Scoped proposal tools require a closed ranked command profile."
                 )
@@ -1887,24 +2183,49 @@ class HitlRuntime:
                 raise HitlValidationError(
                     "Ranked command profiles require their proposal preparation attempt."
                 )
-            if normalized_discussion_attempt_dir is not None:
+            if (
+                normalized_proposal_discussion_attempt_dir is not None
+                or normalized_planning_discussion_attempt_dir is not None
+            ):
                 raise HitlValidationError(
                     "Ranked command profiles do not use a discussion attempt directory."
                 )
         else:
-            from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
+            from core.hitl_discussion import parse_discussion_task_id
 
+            discussion_kind = str(profile_spec["discussion_kind"])
+            stage_planning = bool(
+                discussion_kind == "planning"
+                and normalized_planning_stage_owner is not None
+            )
+            if self.tool_scope is None or self._tool_scope_kind != "discussion":
+                raise HitlValidationError(
+                    "Discussion command profiles require a scoped discussion runtime."
+                )
+            expected_actor = profile_spec.get("actor")
+            allowed_actors = profile_spec.get("actors")
             if (
-                self.pipeline_stage != "experiment_runner"
-                or self.tool_scope is None
-                or self._tool_scope_kind != "discussion"
+                expected_actor is not None
+                and normalized_actor != expected_actor
+            ) or (
+                allowed_actors is not None
+                and normalized_actor not in allowed_actors
             ):
                 raise HitlValidationError(
-                    "Discussion command profiles require a scoped experiment-runner runtime."
-                )
-            if normalized_actor != profile_spec["actor"]:
-                raise HitlValidationError(
                     "Discussion command profile does not match its worker actor."
+                )
+            if stage_planning and (
+                self.pipeline_stage
+                != normalized_planning_stage_owner["pipeline_stage"]
+                or normalized_actor != self.pipeline_stage
+                or not stage_owner_provenance_matches
+            ):
+                raise HitlValidationError(
+                    "Planning discussion profile does not match its stage invocation."
+                )
+            if not stage_planning and self.pipeline_stage != "experiment_runner":
+                raise HitlValidationError(
+                    "Candidate discussion profiles require an experiment-runner runtime."
                 )
             if hitl_stage != profile_spec["hitl_stage"]:
                 raise HitlValidationError(
@@ -1912,15 +2233,23 @@ class HitlRuntime:
                 )
             task_id = str(normalized_provenance.get("discussion_turn_id", "")).strip()
             try:
-                task_identity = parse_proposal_discussion_task_id(task_id)
+                task_identity = parse_discussion_task_id(task_id)
             except ValueError as exc:
                 raise HitlValidationError(str(exc)) from exc
             if (
                 task_id != self.tool_scope
                 or task_identity.phase not in profile_spec["discussion_phases"]
                 or str(normalized_provenance.get("proposal_task_id", "")).strip()
-                or not str(normalized_provenance.get("parent_node_id", "")).strip()
-                or not str(normalized_provenance.get("attempt_id", "")).strip()
+                or (
+                    not stage_planning
+                    and not str(
+                        normalized_provenance.get("parent_node_id", "")
+                    ).strip()
+                )
+                or (
+                    not stage_planning
+                    and not str(normalized_provenance.get("attempt_id", "")).strip()
+                )
             ):
                 raise HitlValidationError(
                     "Discussion command profile does not match its runtime provenance."
@@ -1929,18 +2258,44 @@ class HitlRuntime:
                 raise HitlValidationError(
                     "Discussion command profiles require derived idea visibility inputs."
                 )
-            if not normalized_preparation_attempt_id:
+            if not stage_planning and not normalized_preparation_attempt_id:
                 raise HitlValidationError(
                     "Discussion command profiles require their proposal preparation attempt."
                 )
-            if (
-                normalized_discussion_attempt_dir is None
-                or normalized_discussion_attempt_dir.name
-                != str(normalized_provenance.get("attempt_id", "")).strip()
-            ):
+            normalized_discussion_attempt_dir = (
+                normalized_proposal_discussion_attempt_dir
+                if discussion_kind == "proposal"
+                else normalized_planning_discussion_attempt_dir
+            )
+            unused_discussion_attempt_dir = (
+                normalized_planning_discussion_attempt_dir
+                if discussion_kind == "proposal"
+                else normalized_proposal_discussion_attempt_dir
+            )
+            candidate_directory_valid = bool(
+                normalized_discussion_attempt_dir is not None
+                and unused_discussion_attempt_dir is None
+                and normalized_discussion_attempt_dir.name
+                == str(normalized_provenance.get("attempt_id", "")).strip()
+                and normalized_planning_discussion_record_dir is None
+            )
+            stage_directory_valid = bool(
+                stage_planning
+                and normalized_discussion_attempt_dir is None
+                and unused_discussion_attempt_dir is None
+                and normalized_planning_discussion_record_dir is not None
+            )
+            if not (stage_directory_valid or candidate_directory_valid):
+                directory_kind = "record" if stage_planning else "attempt"
                 raise HitlValidationError(
-                    "Discussion command profiles require their matching proposal attempt "
-                    "directory."
+                    "Discussion command profiles require their matching "
+                    f"{discussion_kind} {directory_kind} directory."
+                )
+            if discussion_kind == "planning" and not stage_planning and not str(
+                normalized_provenance.get("proposal_idea_id", "")
+            ).strip():
+                raise HitlValidationError(
+                    "Planning discussion profiles require their admitted proposal premise."
                 )
             if not callable(phase_finish_validator):
                 raise HitlValidationError(
@@ -1987,7 +2342,7 @@ class HitlRuntime:
             if profile == "default"
             else set(profile_spec["commands"])
         )
-        if normalized_discussion_final_owner:
+        if normalized_discussion_final_owner or normalized_planning_final_owner:
             allowed_worker_commands.update(
                 {"hitl-view-discussion", "hitl-reopen-discussion"}
             )
@@ -2013,15 +2368,49 @@ class HitlRuntime:
             "provenance": normalized_provenance,
             **(
                 {"proposal_preparation_attempt_id": normalized_preparation_attempt_id}
-                if profile != "default" or normalized_discussion_final_owner
+                if profile != "default"
+                or normalized_discussion_final_owner
+                or normalized_planning_final_owner
                 else {}
             ),
             **(
-                {"proposal_discussion_attempt_dir": str(normalized_discussion_attempt_dir)}
-                if normalized_discussion_attempt_dir is not None
+                {
+                    "proposal_discussion_attempt_dir": str(
+                        normalized_proposal_discussion_attempt_dir
+                    )
+                }
+                if normalized_proposal_discussion_attempt_dir is not None
+                else {}
+            ),
+            **(
+                {
+                    "planning_discussion_attempt_dir": str(
+                        normalized_planning_discussion_attempt_dir
+                    )
+                }
+                if normalized_planning_discussion_attempt_dir is not None
+                else {}
+            ),
+            **(
+                {
+                    "planning_discussion_record_dir": str(
+                        normalized_planning_discussion_record_dir
+                    )
+                }
+                if normalized_planning_discussion_record_dir is not None
+                else {}
+            ),
+            **(
+                {"planning_discussion_stage_owner": normalized_planning_stage_owner}
+                if normalized_planning_stage_owner is not None
                 else {}
             ),
             "proposal_discussion_final_owner": normalized_discussion_final_owner,
+            "planning_discussion_final_owner": normalized_planning_final_owner,
+            "planning_discussion_prompt_composer": planning_discussion_prompt_composer,
+            "planning_discussion_reopen_capacity_validator": (
+                planning_discussion_reopen_capacity_validator
+            ),
             **(
                 {"scoped_task_cancel_event": scoped_task_cancel_event}
                 if scoped_task_cancel_event is not None
@@ -2060,15 +2449,14 @@ class HitlRuntime:
 
         self._tool_context["plan_finish_validator"] = None
         self._tool_context["phase_finish_validator"] = None
-        if hitl_stage == "proposal":
-            profile_spec = _closed_scoped_task_profile_spec(
-                self._tool_context.get("command_profile", "")
-            )
-            if profile_spec is not None and profile_spec["scope_kind"] == "discussion":
-                supplied = self._tool_context.get("supplied_phase_finish_validator")
-                if callable(supplied):
-                    self._tool_context["phase_finish_validator"] = supplied
-                return
+        profile_spec = _closed_scoped_task_profile_spec(
+            self._tool_context.get("command_profile", "")
+        )
+        if profile_spec is not None and profile_spec["scope_kind"] == "discussion":
+            supplied = self._tool_context.get("supplied_phase_finish_validator")
+            if callable(supplied):
+                self._tool_context["phase_finish_validator"] = supplied
+            return
         if hitl_stage == "plan":
             supplied = self._tool_context.get("supplied_plan_finish_validator")
             if callable(supplied):
@@ -2154,6 +2542,8 @@ class HitlRuntime:
         self.current_hitl_stage = to_stage
         self._tool_context["requires_human_approval"] = False
         self._tool_context["allowed_worker_commands"] = self._worker_commands_for_stage(to_stage)
+        if to_stage == "execution":
+            self._tool_context["planning_discussion_final_owner"] = False
         if self._time_budget_command_available():
             self._tool_context["allowed_worker_commands"].add("hitl-time-budget")
         self._install_stage_guards(to_stage)
@@ -2451,6 +2841,7 @@ class HitlRuntime:
                 self._tool_context.get("command_profile", "")
             )
             or bool(self._tool_context.get("proposal_discussion_final_owner"))
+            or bool(self._tool_context.get("planning_discussion_final_owner"))
         )
         self.stop_idea_tool_server()
         # A stopped worker can unwind before its asynchronous scorer finishes
@@ -2522,13 +2913,27 @@ class HitlRuntime:
             )
         if profile_spec["scope_kind"] == "discussion":
             task_context = self._discussion_task_state_context()
+            seed_idea_ids = _normalize_premises(
+                visibility.get("seed_idea_ids", ())
+            )
+            if (
+                profile_spec.get("discussion_kind") == "planning"
+                and "admitted_proposal_idea_id" in task_context["session"]
+            ):
+                seed_idea_ids.append(
+                    str(task_context["session"]["admitted_proposal_idea_id"])
+                )
             return visible_discussion_idea_records(
                 records,
                 parent_node_id=provenance.get("parent_node_id", ""),
                 candidate_attempt_id=provenance.get("attempt_id", ""),
                 discussion_turn_id=provenance.get("discussion_turn_id", ""),
                 discussion_state=task_context["session"],
-                seed_idea_ids=visibility.get("seed_idea_ids", ()),
+                actor=str(self._tool_context.get("actor", "")),
+                pipeline_stage=str(self._tool_context.get("pipeline_stage", "")),
+                hitl_stage=str(profile_spec["hitl_stage"]),
+                discussion_kind=str(profile_spec["discussion_kind"]),
+                seed_idea_ids=seed_idea_ids,
             )
         ranked_spec = _RANKED_COMMAND_PROFILES.get(profile)
         if ranked_spec is None:
@@ -2565,7 +2970,7 @@ class HitlRuntime:
     ) -> Dict[str, Any]:
         """Resolve one authenticated task from durable discussion state."""
 
-        from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
+        from core.hitl_discussion import parse_discussion_task_id
         from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
 
         profile = str(self._tool_context.get("command_profile", ""))
@@ -2579,7 +2984,7 @@ class HitlRuntime:
             raise HitlValidationError("Discussion task access requires runtime provenance.")
         task_id = str(provenance.get("discussion_turn_id", "")).strip()
         try:
-            task_identity = parse_proposal_discussion_task_id(task_id)
+            task_identity = parse_discussion_task_id(task_id)
         except ValueError as exc:
             raise HitlValidationError(str(exc)) from exc
         if (
@@ -2589,27 +2994,57 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Discussion task access does not match its authenticated task session."
             )
-        identity = {
-            "parent_node_sha": str(provenance.get("parent_node_id", "")).strip(),
-            "preparation_attempt_id": str(
-                self._tool_context.get("proposal_preparation_attempt_id", "")
-            ).strip(),
-            "candidate_attempt_id": str(provenance.get("attempt_id", "")).strip(),
-        }
-        if not all(identity.values()):
-            raise HitlValidationError("Discussion task access has incomplete identity.")
         state = HitlRuntimeState(self.work_dir)
+        discussion_kind = str(profile_spec["discussion_kind"])
+        stage_owner = self._tool_context.get("planning_discussion_stage_owner")
+        identity: Dict[str, str] = {}
+        planning_binding = None
+        if discussion_kind == "planning" and isinstance(stage_owner, dict):
+            try:
+                planning_binding = state.bind_stage_planning_discussion(
+                    owner=stage_owner
+                )
+            except HitlRuntimeStateError as exc:
+                raise HitlValidationError(str(exc)) from exc
+        else:
+            identity = {
+                "parent_node_sha": str(
+                    provenance.get("parent_node_id", "")
+                ).strip(),
+                "preparation_attempt_id": str(
+                    self._tool_context.get("proposal_preparation_attempt_id", "")
+                ).strip(),
+                "candidate_attempt_id": str(
+                    provenance.get("attempt_id", "")
+                ).strip(),
+            }
+            if not all(identity.values()):
+                raise HitlValidationError(
+                    "Discussion task access has incomplete identity."
+                )
+            if discussion_kind == "planning":
+                planning_binding = state.bind_candidate_planning_discussion(**identity)
         try:
-            if allow_completed:
+            if discussion_kind == "proposal" and allow_completed:
                 session = state.proposal_discussion_snapshot(**identity)
                 task = state.proposal_discussion_task_snapshot(
                     **identity,
                     discussion_task_id=task_id,
                 )
-            else:
+            elif discussion_kind == "proposal":
                 active = state.active_proposal_discussion_task_snapshot(
                     **identity,
                     discussion_task_id=task_id,
+                )
+                session = active["session"]
+                task = active["task"]
+            elif allow_completed:
+                session = planning_binding.snapshot()
+                task = planning_binding.task_snapshot(task_id)
+            else:
+                active = planning_binding.task_snapshot(
+                    task_id,
+                    require_active=True,
                 )
                 session = active["session"]
                 task = active["task"]
@@ -2620,10 +3055,16 @@ class HitlRuntime:
             raise HitlValidationError("Discussion task kind does not match its task identity.")
         if allow_completed and task.get("result_record_id") is None:
             try:
-                active = state.active_proposal_discussion_task_snapshot(
-                    **identity,
-                    discussion_task_id=task_id,
-                )
+                if discussion_kind == "proposal":
+                    active = state.active_proposal_discussion_task_snapshot(
+                        **identity,
+                        discussion_task_id=task_id,
+                    )
+                else:
+                    active = planning_binding.task_snapshot(
+                        task_id,
+                        require_active=True,
+                    )
             except HitlRuntimeStateError as exc:
                 raise HitlValidationError(str(exc)) from exc
             session = active["session"]
@@ -2638,14 +3079,27 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Discussion task visibility does not match its durable meeting boundary."
             )
+        if (
+            discussion_kind == "planning"
+            and not isinstance(stage_owner, dict)
+            and str(
+                provenance.get("proposal_idea_id", "")
+            ).strip()
+            != str(session.get("admitted_proposal_idea_id", "")).strip()
+        ):
+            raise HitlValidationError(
+                "Planning discussion task does not match its admitted proposal premise."
+            )
         return {
             "state": state,
             "identity": identity,
+            "planning_binding": planning_binding,
             "session": session,
             "task": task,
             "task_id": task_id,
             "task_identity": task_identity,
             "profile": profile,
+            "discussion_kind": discussion_kind,
         }
 
     def _ranked_task_state_context(
@@ -2794,7 +3248,7 @@ class HitlRuntime:
                 + "\nRestore the task workspace boundary, then retry the same finish command."
             )
 
-    def _validate_discussion_task_workspace(self) -> None:
+    def _validate_discussion_task_workspace(self, *, discussion_kind: str) -> None:
         validator = self._tool_context.get("phase_finish_validator")
         if not callable(validator):
             raise HitlValidationError(
@@ -2818,7 +3272,7 @@ class HitlRuntime:
                 f"- {str(issue)}" for issue in issues if str(issue).strip()
             )
             raise HitlValidationError(
-                "HITL_ERROR proposal_discussion_workspace_boundary\n"
+                f"HITL_ERROR {discussion_kind}_discussion_workspace_boundary\n"
                 "Runtime rejected this result because the discussion task changed "
                 "its read-only workspace or whiteboard boundary."
                 + (f"\n{details}" if details else "")
@@ -2835,18 +3289,45 @@ class HitlRuntime:
             raise HitlValidationError("Discussion task has no public record directory.")
         return ProposalDiscussionRecordStore(Path(attempt_dir))
 
+    def _planning_discussion_record_store(self):
+        from core.hitl_planning_discussion import PlanningDiscussionRecordStore
+
+        record_dir = str(
+            self._tool_context.get("planning_discussion_record_dir", "")
+        ).strip()
+        if record_dir:
+            return PlanningDiscussionRecordStore.from_root(Path(record_dir))
+        attempt_dir = str(
+            self._tool_context.get("planning_discussion_attempt_dir", "")
+        ).strip()
+        if not attempt_dir:
+            raise HitlValidationError("Discussion task has no public record directory.")
+        return PlanningDiscussionRecordStore(Path(attempt_dir))
+
+    def _discussion_record_store(self, task_context: Dict[str, Any]):
+        if task_context.get("discussion_kind") == "planning":
+            return self._planning_discussion_record_store()
+        return self._proposal_discussion_record_store()
+
     def _normalize_discussion_task_output(
         self,
         payload: Dict[str, Any],
         task_context: Dict[str, Any],
     ) -> Dict[str, Any]:
         from core.hitl_manager_context import estimate_compact_json_tokens
-        from core.hitl_proposal_discussion import normalize_proposal_discussion_record
+        if task_context.get("discussion_kind") == "planning":
+            from core.hitl_planning_discussion import (
+                normalize_planning_discussion_record as normalize_record,
+            )
+        else:
+            from core.hitl_proposal_discussion import (
+                normalize_proposal_discussion_record as normalize_record,
+            )
 
         if not isinstance(payload, dict):
             raise HitlValidationError("Discussion task finish payload must be a JSON object.")
         try:
-            record = normalize_proposal_discussion_record(
+            record = normalize_record(
                 task_context["task_id"],
                 task_context["task"]["kind"],
                 payload,
@@ -2874,7 +3355,7 @@ class HitlRuntime:
             )
         matches = [
             record
-            for record in self._proposal_discussion_record_store().records()
+            for record in self._discussion_record_store(task_context).records()
             if record.get("record_id") == record_id
         ]
         if len(matches) != 1:
@@ -3107,7 +3588,9 @@ class HitlRuntime:
         with self._tool_lock:
             self._reject_cancelled_scoped_task_mutation()
             task_context = self._discussion_task_state_context(allow_completed=True)
-            self._validate_discussion_task_workspace()
+            self._validate_discussion_task_workspace(
+                discussion_kind=task_context["discussion_kind"]
+            )
             normalized = self._normalize_discussion_task_output(payload, task_context)
             task = task_context["task"]
             if task.get("result_record_id") is not None:
@@ -3123,7 +3606,7 @@ class HitlRuntime:
                     "instruction": "The discussion task is recorded. Stop this worker session.",
                 }
 
-            store = self._proposal_discussion_record_store()
+            store = self._discussion_record_store(task_context)
             if task.get("pending_finalization") is None and any(
                 record.get("record_id") == task_context["task_id"]
                 for record in store.records()
@@ -3133,7 +3616,8 @@ class HitlRuntime:
                     "adopt artifact content into task state."
                 )
             if (
-                task.get("pending_finalization") is None
+                task_context["discussion_kind"] == "proposal"
+                and task.get("pending_finalization") is None
                 and normalized.get("choice") == "continue"
             ):
                 self._validate_proposal_discussion_continue_capacity(
@@ -3141,22 +3625,37 @@ class HitlRuntime:
                     result=normalized,
                 )
             if (
-                task.get("pending_finalization") is None
+                task_context["discussion_kind"] == "proposal"
+                and task.get("pending_finalization") is None
                 and normalized.get("choice") == "finalize"
             ):
                 self._validate_proposal_discussion_finalize_capacity(
                     task_context=task_context,
                     result=normalized,
                 )
-            state_args = {
-                **task_context["identity"],
-                "discussion_task_id": task_context["task_id"],
-            }
-            try:
-                intent = task_context["state"].begin_proposal_discussion_task_finalization(
-                    **state_args,
-                    normalized_output=normalized,
+            if (
+                task_context["discussion_kind"] == "planning"
+                and task.get("pending_finalization") is None
+                and task_context["task_identity"].phase != "initial"
+            ):
+                self._validate_planning_discussion_task_capacity(
+                    task_context=task_context,
+                    result=normalized,
                 )
+            try:
+                if task_context["discussion_kind"] == "planning":
+                    intent = task_context["planning_binding"].begin_task_finalization(
+                        task_context["task_id"],
+                        normalized,
+                    )
+                else:
+                    intent = task_context[
+                        "state"
+                    ].begin_proposal_discussion_task_finalization(
+                        **task_context["identity"],
+                        discussion_task_id=task_context["task_id"],
+                        normalized_output=normalized,
+                    )
             except HitlRuntimeStateError as exc:
                 raise HitlValidationError(str(exc)) from exc
             try:
@@ -3168,11 +3667,21 @@ class HitlRuntime:
             except (RuntimeError, ValueError) as exc:
                 raise HitlValidationError(str(exc)) from exc
             try:
-                task_context["state"].complete_proposal_discussion_task_finalization(
-                    **state_args,
-                    normalized_output=intent,
-                    result_record_id=record["record_id"],
-                )
+                if task_context["discussion_kind"] == "planning":
+                    task_context["planning_binding"].complete_task_finalization(
+                        task_context["task_id"],
+                        intent,
+                        record["record_id"],
+                    )
+                else:
+                    task_context[
+                        "state"
+                    ].complete_proposal_discussion_task_finalization(
+                        **task_context["identity"],
+                        discussion_task_id=task_context["task_id"],
+                        normalized_output=intent,
+                        result_record_id=record["record_id"],
+                    )
             except HitlRuntimeStateError as exc:
                 raise HitlValidationError(str(exc)) from exc
             self._tool_context["scoped_task_terminal"] = True
@@ -3194,13 +3703,15 @@ class HitlRuntime:
                     "record_id": None,
                 }
             task_context = self._discussion_task_state_context(allow_completed=True)
-            self._validate_discussion_task_workspace()
+            self._validate_discussion_task_workspace(
+                discussion_kind=task_context["discussion_kind"]
+            )
             task = task_context["task"]
             result_record_id = str(task.get("result_record_id") or "").strip()
             pending = task.get("pending_finalization")
             matching_records = [
                 record
-                for record in self._proposal_discussion_record_store().records()
+                for record in self._discussion_record_store(task_context).records()
                 if record.get("record_id") == task_context["task_id"]
             ]
             if result_record_id:
@@ -3254,7 +3765,9 @@ class HitlRuntime:
 
         with self._tool_lock:
             task_context = self._discussion_task_state_context(allow_completed=True)
-            self._validate_discussion_task_workspace()
+            self._validate_discussion_task_workspace(
+                discussion_kind=task_context["discussion_kind"]
+            )
             if task_context["task"].get("result_record_id") is not None:
                 record = self._validate_discussion_result_reference(task_context)
                 self._tool_context["scoped_task_terminal"] = True
@@ -3304,13 +3817,18 @@ class HitlRuntime:
 
             failed = _provider_failure_counter_update(result)
             if failed is not None:
-                failures = task_context[
-                    "state"
-                ].record_proposal_discussion_task_provider_result(
-                    **task_context["identity"],
-                    discussion_task_id=task_context["task_id"],
-                    failed=failed,
-                )
+                if task_context["discussion_kind"] == "planning":
+                    failures = task_context["planning_binding"].record_provider_result(
+                        task_context["task_id"], failed
+                    )
+                else:
+                    failures = task_context[
+                        "state"
+                    ].record_proposal_discussion_task_provider_result(
+                        **task_context["identity"],
+                        discussion_task_id=task_context["task_id"],
+                        failed=failed,
+                    )
                 self._stop_after_provider_failure_threshold(failures)
 
             prompt_block = self._replacement_prompt_after_worker_exit(
@@ -3659,6 +4177,7 @@ class HitlRuntime:
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
             self._require_active_proposal_discussion_final_owner_mutation()
+            self._require_active_planning_discussion_final_owner_mutation()
             self._require_worker_command("hitl-report-idea")
             self._reject_cancelled_scoped_task_mutation()
             if self._tool_context.get("scoped_task_terminal"):
@@ -4677,6 +5196,300 @@ class HitlRuntime:
         finally:
             self._worker_request_lock.release()
 
+    def _planning_feedback_source_for_reopen(
+        self,
+        task_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate the exact unchanged plan-feedback boundary for reopening."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        pending = self._pending_worker_command()
+        continuation = self.worker_continuation()
+        response = pending.get("response") if isinstance(pending, dict) else None
+        record = response.get("record") if isinstance(response, dict) else None
+        provenance = pending.get("provenance") if isinstance(pending, dict) else None
+        identity = task_context["identity"]
+        session = task_context["session"]
+        stage_owner = self._tool_context.get("planning_discussion_stage_owner")
+        expected_provenance = dict(self._tool_context.get("provenance") or {})
+        stage_planning = isinstance(stage_owner, dict)
+        request_key = str((pending or {}).get("request_key", "")).strip()
+        feedback_ref = str((record or {}).get("idea_id", "")).strip()
+        if (
+            not isinstance(pending, dict)
+            or pending.get("kind") != "phase_finish"
+            or pending.get("pipeline_stage") != self.pipeline_stage
+            or pending.get("hitl_stage") != "plan"
+            or pending.get("status") != "resolved"
+            or not isinstance(response, dict)
+            or response.get("status") != "feedback"
+            or not isinstance(record, dict)
+            or not request_key
+            or not feedback_ref
+            or not isinstance(provenance, dict)
+            or (
+                stage_planning
+                and dict(provenance) != expected_provenance
+            )
+            or (
+                not stage_planning
+                and (
+                    str(provenance.get("parent_node_id", "")).strip()
+                    != identity["parent_node_sha"]
+                    or str(provenance.get("attempt_id", "")).strip()
+                    != identity["candidate_attempt_id"]
+                    or str(provenance.get("proposal_idea_id", "")).strip()
+                    != str(session.get("admitted_proposal_idea_id", "")).strip()
+                )
+            )
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_stale\n"
+                "The current worker does not own an exact resolved plan-feedback request."
+            )
+        continuation_provenance = (
+            continuation.get("provenance")
+            if isinstance(continuation, dict)
+            else None
+        )
+        if (
+            not isinstance(continuation, dict)
+            or continuation.get("pipeline_stage") != self.pipeline_stage
+            or continuation.get("hitl_stage") != "plan"
+            or continuation.get("actor")
+            != str(self._tool_context.get("actor", self.pipeline_stage))
+            or continuation_provenance != provenance
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_stale\n"
+                "The plan-feedback request no longer owns this plan continuation."
+            )
+        logged = [
+            item for item in self.log.records() if item.get("idea_id") == feedback_ref
+        ]
+        if len(logged) != 1 or HitlIdeaLog.logical_payload(logged[0]) != HitlIdeaLog.logical_payload(record):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_feedback\n"
+                "The finalized plan feedback record is missing or inconsistent."
+            )
+        plan_fingerprint = str(pending.get("plan_fingerprint", "")).strip()
+        workspace_fingerprint = str(
+            pending.get("workspace_fingerprint", "")
+        ).strip()
+        scope = pending.get("workspace_fingerprint_scope")
+        scope = dict(scope) if isinstance(scope, dict) and scope else None
+        if (
+            not plan_fingerprint
+            or self._current_plan_fingerprint() != plan_fingerprint
+            or not workspace_fingerprint
+            or HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=scope,
+            )
+            != workspace_fingerprint
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_boundary\n"
+                "The reviewed plan or workspace has changed. Continue the existing "
+                "direct revision; reopening is available only before editing."
+            )
+        whiteboard_sha = session.get("whiteboard_boundary_sha")
+        if whiteboard_sha is not None:
+            from core.hitl_git_state import HitlGitStateStore
+
+            git_state = HitlGitStateStore(self.work_dir)
+            whiteboard_sha = git_state.hitl_autoresearch_whiteboard_history_sha()
+            if not git_state.hitl_autoresearch_whiteboard_matches_commit(
+                whiteboard_sha
+            ):
+                raise HitlValidationError(
+                    "HITL_ERROR planning_reopen_boundary\n"
+                    "The live whiteboard does not match its canonical history."
+                )
+        return {
+            "worker_request_key": request_key,
+            "feedback_ref": feedback_ref,
+            "feedback_record": logged[0],
+            "whiteboard_boundary_sha": whiteboard_sha,
+        }
+
+    def reopen_planning_discussion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Record one eligible plan-owner handoff back to planning discussion."""
+
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                from core.hitl_discussion import reopen_discussion_record_id
+                from core.hitl_planning_discussion import (
+                    normalize_planning_discussion_record,
+                )
+                from core.hitl_runtime_state import HitlRuntimeStateError
+
+                task_context = self._planning_discussion_final_owner_state_context()
+                session = task_context["session"]
+                next_round = int(session["round_ordinal"]) + 1
+                if next_round > int(session["max_response_rounds"]):
+                    raise HitlValidationError(
+                        "HITL_ERROR discussion_round_limit\n"
+                        "This planning meeting has used all configured response rounds. "
+                        "Revise the plan directly."
+                    )
+                if not isinstance(payload, dict) or set(payload) != {"reason"}:
+                    raise HitlValidationError(
+                        "Discussion reopening requires exactly one nonempty reason."
+                    )
+                source = self._planning_feedback_source_for_reopen(task_context)
+                record_id = reopen_discussion_record_id(next_round)
+                try:
+                    result = normalize_planning_discussion_record(
+                        record_id,
+                        "reopen",
+                        {
+                            "reason": payload.get("reason"),
+                            "feedback_ref": source["feedback_ref"],
+                        },
+                    )["result"]
+                except ValueError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+                if session.get("phase") == "final_writing":
+                    capacity = self._tool_context.get(
+                        "planning_discussion_reopen_capacity_validator"
+                    )
+                    if not callable(capacity):
+                        raise HitlValidationError(
+                            "Collaborative planning has no reopen capacity validator."
+                        )
+                    try:
+                        capacity(
+                            {
+                                "record_id": record_id,
+                                "result": result,
+                                "feedback_record": source["feedback_record"],
+                            }
+                        )
+                    except ValueError as exc:
+                        raise HitlValidationError(
+                            "HITL_ERROR discussion_context_too_large\n"
+                            "The next planning response round and later revision cannot "
+                            "fit the verified worker context. Revise the plan directly."
+                        ) from exc
+                try:
+                    task_context["planning_binding"].begin_reopen(
+                        worker_request_key=source["worker_request_key"],
+                        feedback_ref=source["feedback_ref"],
+                        reopen_record_id=record_id,
+                        result=result,
+                    )
+                    self._planning_discussion_record_store().append(
+                        record_id=record_id,
+                        kind="reopen",
+                        result=result,
+                    )
+                    task_context[
+                        "planning_binding"
+                    ].complete_reopen_finalization(
+                        reopen_record_id=record_id,
+                        result=result,
+                    )
+                except HitlRuntimeStateError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+                commands = self._tool_context.get("allowed_worker_commands")
+                if isinstance(commands, set):
+                    commands.discard("hitl-report-idea")
+                    commands.discard("hitl-finish-phase")
+                    self._write_idea_tool_commands()
+                self._tool_context["planning_discussion_reopen_record_id"] = record_id
+                return {
+                    "status": "recorded",
+                    "record_id": record_id,
+                    "instruction": (
+                        "Runtime recorded the handoff. Stop this plan-owner session now; "
+                        "the same planning meeting will continue after runtime settles it."
+                    ),
+                }
+        finally:
+            self._worker_request_lock.release()
+
+    def reopen_discussion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch the shared reopen command by authenticated final-owner context."""
+
+        if bool(self._tool_context.get("planning_discussion_final_owner")):
+            return self.reopen_planning_discussion(payload)
+        return self.reopen_proposal_discussion(payload)
+
+    def reconcile_planning_discussion_reopen(self) -> Dict[str, str]:
+        """Finish an accepted planning reopen append after interruption."""
+
+        with self._tool_lock:
+            from core.hitl_runtime_state import HitlRuntimeStateError
+
+            task_context = self._planning_discussion_final_owner_state_context()
+            session = task_context["session"]
+            handoff = session.get("reopen_handoff")
+            if session.get("phase") != "reopen_pending" or not isinstance(
+                handoff, dict
+            ):
+                raise HitlValidationError(
+                    "Collaborative planning has no accepted reopen handoff to recover."
+                )
+            record_id = str(handoff.get("reopen_record_id", "")).strip()
+            store = self._planning_discussion_record_store()
+            pending = handoff.get("pending_finalization")
+            if pending is not None:
+                try:
+                    record = store.append(
+                        record_id=record_id,
+                        kind="reopen",
+                        result=pending,
+                    )
+                    task_context[
+                        "planning_binding"
+                    ].complete_reopen_finalization(
+                        reopen_record_id=record_id,
+                        result=record["result"],
+                    )
+                except (HitlRuntimeStateError, RuntimeError, ValueError) as exc:
+                    raise HitlValidationError(str(exc)) from exc
+            else:
+                matches = [
+                    record
+                    for record in store.records()
+                    if record.get("record_id") == record_id
+                ]
+                if len(matches) != 1 or matches[0].get("kind") != "reopen":
+                    raise HitlValidationError(
+                        "Planning discussion reopen record is missing or duplicated."
+                    )
+            return {"status": "recorded", "reopen_record_id": record_id}
+
+    def prepare_planning_discussion_reopen_transfer(
+        self,
+        reopen_record_id: str,
+    ) -> Dict[str, Any]:
+        """Revalidate the reviewed plan boundary before ownership transfer."""
+
+        with self._tool_lock:
+            task_context = self._planning_discussion_final_owner_state_context()
+            session = task_context["session"]
+            handoff = session.get("reopen_handoff")
+            record_id = str(reopen_record_id).strip()
+            if (
+                session.get("phase") != "reopen_pending"
+                or not isinstance(handoff, dict)
+                or handoff.get("pending_finalization") is not None
+                or handoff.get("reopen_record_id") != record_id
+            ):
+                raise HitlValidationError(
+                    "Collaborative planning reopening is not ready to transfer ownership."
+                )
+            source = self._planning_feedback_source_for_reopen(task_context)
+            return {
+                "reopen_record_id": record_id,
+                "whiteboard_boundary_sha": source["whiteboard_boundary_sha"],
+            }
+
     def prepare_proposal_discussion_reopen_transfer(
         self,
         reopen_record_id: str,
@@ -4842,10 +5655,27 @@ class HitlRuntime:
 
         with self._tool_lock:
             task_context = self._proposal_discussion_reader_state_context()
-            store = self._proposal_discussion_record_store()
-            permitted = self._permitted_proposal_discussion_record_ids(
-                task_context["session"],
-            )
+            if task_context.get("discussion_kind") == "planning":
+                from core.hitl_planning_discussion import (
+                    permitted_planning_discussion_record_ids,
+                )
+
+                store = self._planning_discussion_record_store()
+                try:
+                    permitted = list(
+                        permitted_planning_discussion_record_ids(
+                            task_context["session"]
+                        )
+                    )
+                except ValueError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+                record_subject = "Planning discussion"
+            else:
+                store = self._proposal_discussion_record_store()
+                permitted = self._permitted_proposal_discussion_record_ids(
+                    task_context["session"],
+                )
+                record_subject = "Proposal discussion"
             request = dict(payload or {})
             unexpected = set(request) - {"record_id", "offset", "limit"}
             if unexpected:
@@ -4871,7 +5701,7 @@ class HitlRuntime:
             except (RuntimeError, ValueError) as exc:
                 raise HitlValidationError(str(exc)) from exc
             lines = [
-                f"Proposal discussion records: {result['total']}",
+                f"{record_subject} records: {result['total']}",
                 *(
                     f"{item['record_id']} [{item['kind']}] {item['label']}"
                     for item in result["records"]
@@ -4884,9 +5714,75 @@ class HitlRuntime:
     def _proposal_discussion_reader_state_context(self) -> Dict[str, Any]:
         """Authorize either one finite task or the matching final proposal owner."""
 
-        if not bool(self._tool_context.get("proposal_discussion_final_owner")):
-            return self._discussion_task_state_context()
-        return self._proposal_discussion_final_owner_state_context()
+        if bool(self._tool_context.get("proposal_discussion_final_owner")):
+            return self._proposal_discussion_final_owner_state_context()
+        if bool(self._tool_context.get("planning_discussion_final_owner")):
+            return self._planning_discussion_final_owner_state_context()
+        return self._discussion_task_state_context()
+
+    def _planning_discussion_final_owner_state_context(self) -> Dict[str, Any]:
+        """Return the exact planning session owned by the ordinary plan owner."""
+
+        if (
+            str(self._tool_context.get("command_profile", "")) != "default"
+            or self.tool_scope is not None
+            or self._tool_context.get("hitl_stage") != "plan"
+        ):
+            raise HitlValidationError(
+                "Planning discussion reading does not match the final-owner session."
+            )
+        provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, dict):
+            raise HitlValidationError(
+                "Collaborative plan-owner access requires runtime provenance."
+            )
+        from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+
+        state = HitlRuntimeState(self.work_dir)
+        stage_owner = self._tool_context.get("planning_discussion_stage_owner")
+        try:
+            if isinstance(stage_owner, dict):
+                binding = state.bind_stage_planning_discussion(owner=stage_owner)
+                identity: Dict[str, str] = {}
+            else:
+                identity = {
+                    "parent_node_sha": str(
+                        provenance.get("parent_node_id", "")
+                    ).strip(),
+                    "preparation_attempt_id": str(
+                        self._tool_context.get(
+                            "proposal_preparation_attempt_id", ""
+                        )
+                    ).strip(),
+                    "candidate_attempt_id": str(
+                        provenance.get("attempt_id", "")
+                    ).strip(),
+                }
+                if not all(identity.values()):
+                    raise HitlValidationError(
+                        "Collaborative plan-owner access has incomplete identity."
+                    )
+                binding = state.bind_candidate_planning_discussion(**identity)
+            session = binding.snapshot()
+        except HitlRuntimeStateError as exc:
+            raise HitlValidationError(str(exc)) from exc
+        if (
+            session.get("phase") not in {"final_writing", "reopen_pending"}
+            or (
+                not isinstance(stage_owner, dict)
+                and str(session.get("admitted_proposal_idea_id", "")).strip()
+                != str(provenance.get("proposal_idea_id", "")).strip()
+            )
+        ):
+            raise HitlValidationError(
+                "Planning discussion records are not owned by the active plan writer."
+            )
+        return {
+            "identity": identity,
+            "session": session,
+            "planning_binding": binding,
+            "discussion_kind": "planning",
+        }
 
     def _proposal_discussion_final_owner_state_context(self) -> Dict[str, Any]:
         """Return the exact collaborative session owned by this final proposer."""
@@ -4943,6 +5839,19 @@ class HitlRuntime:
                 "submit another proposal."
             )
 
+    def _require_active_planning_discussion_final_owner_mutation(self) -> None:
+        """Reject plan-owner writes after discussion ownership is transferred."""
+
+        if not bool(self._tool_context.get("planning_discussion_final_owner")):
+            return
+        task_context = self._planning_discussion_final_owner_state_context()
+        if task_context["session"].get("phase") != "final_writing":
+            raise HitlValidationError(
+                "HITL_ERROR planning_discussion_ownership_transferred\n"
+                "This plan owner has returned control to collaborative planning. "
+                "Stop this worker session; do not report more ideas or finish the phase."
+            )
+
     @staticmethod
     def _permitted_proposal_discussion_record_ids(
         session: Dict[str, Any],
@@ -4971,6 +5880,262 @@ class HitlRuntime:
                 return store.ordered_records(permitted)
             except RuntimeError as exc:
                 raise HitlValidationError(str(exc)) from exc
+
+    def planning_discussion_records_for_prompt(self) -> List[Dict[str, Any]]:
+        """Return planning records authorized for the active finite task."""
+
+        from core.hitl_planning_discussion import (
+            permitted_planning_discussion_record_ids,
+        )
+
+        with self._tool_lock:
+            task_context = self._discussion_task_state_context()
+            if task_context.get("discussion_kind") != "planning":
+                raise HitlValidationError(
+                    "Planning discussion records require a planning task session."
+                )
+            try:
+                permitted = permitted_planning_discussion_record_ids(
+                    task_context["session"]
+                )
+                return self._planning_discussion_record_store().ordered_records(
+                    permitted
+                )
+            except (RuntimeError, ValueError) as exc:
+                raise HitlValidationError(str(exc)) from exc
+
+    def prepare_planning_discussion_prompt(
+        self,
+        *,
+        prompt_template: str,
+        public_background: Dict[str, Any],
+        next_prompt_template: str = "",
+        final_prompt_template: str = "",
+    ) -> str:
+        """Prepare bounded public meeting context for one planning turn."""
+
+        from core.hitl_planning_discussion import prepare_planning_discussion_prompt
+        from core.hitl_planning_discussion import (
+            planning_discussion_reopen_source_idea_ids,
+        )
+        from core.hitl_run_control import current_hitl_run_budget_prompt
+
+        with self._tool_lock:
+            task_context = self._discussion_task_state_context()
+            if task_context.get("discussion_kind") != "planning":
+                raise HitlValidationError(
+                    "Planning discussion context requires a planning task session."
+                )
+            self._tool_context["planning_discussion_next_prompt_template"] = str(
+                next_prompt_template
+            )
+            self._tool_context["planning_discussion_final_prompt_template"] = str(
+                final_prompt_template
+            )
+            self._tool_context["planning_discussion_public_background"] = dict(
+                public_background
+            )
+            summarize_method = getattr(
+                self.manager, "summarize_planning_discussion", None
+            )
+
+            def summarize(
+                background: Dict[str, Any],
+                prior_summary: str,
+                records: List[Dict[str, Any]],
+            ) -> str:
+                if not callable(summarize_method):
+                    raise ValueError(
+                        "Planning discussion compaction requires the configured HITL manager."
+                    )
+                return str(
+                    summarize_method(
+                        public_background=background,
+                        prior_summary=prior_summary,
+                        records=records,
+                    )
+                )
+
+            def current_session() -> Dict[str, Any]:
+                return task_context["planning_binding"].snapshot()
+
+            store = self._planning_discussion_record_store()
+            source_ids = planning_discussion_reopen_source_idea_ids(
+                task_context["session"], store.records()
+            )
+            reopen_source_ideas = HitlIdeaLog.premise_closure(
+                self.log.records(), seed_idea_ids=source_ids
+            )
+            self._tool_context["planning_discussion_reopen_source_ideas"] = [
+                dict(record) for record in reopen_source_ideas
+            ]
+
+            try:
+                return prepare_planning_discussion_prompt(
+                    store=store,
+                    session=task_context["session"],
+                    prompt_template=prompt_template,
+                    public_background=public_background,
+                    runtime_budget_prompt=current_hitl_run_budget_prompt(
+                        self.work_dir
+                    ),
+                    summarize=summarize if callable(summarize_method) else None,
+                    current_session=current_session,
+                    reopen_source_ideas=reopen_source_ideas,
+                )
+            except (RuntimeError, ValueError) as exc:
+                raise HitlValidationError(str(exc)) from exc
+
+    def _require_planning_discussion_capacity(
+        self,
+        *,
+        projected_session: Dict[str, Any],
+        prompt_templates: Sequence[str],
+        public_background: Dict[str, Any],
+        reserve_contributions: int,
+        additional_records: Sequence[Dict[str, Any]] = (),
+        record_store: Optional[Any] = None,
+        reopen_source_ideas: Sequence[Dict[str, Any]] = (),
+    ) -> None:
+        """Check one projected planning segment with the shared context budget."""
+
+        from core.hitl_planning_discussion import (
+            PLANNING_DISCUSSION_CONTEXT_MARKER,
+            prepare_planning_discussion_prompt,
+        )
+        from core.hitl_run_control import current_hitl_run_budget_prompt
+
+        templates = tuple(str(template) for template in prompt_templates)
+        if not templates or any(
+            template.count(PLANNING_DISCUSSION_CONTEXT_MARKER) != 1
+            for template in templates
+        ):
+            raise ValueError(
+                "Planning discussion capacity requires its exact prompt templates."
+            )
+        if (
+            isinstance(reserve_contributions, bool)
+            or not isinstance(reserve_contributions, int)
+            or reserve_contributions < 0
+        ):
+            raise ValueError(
+                "Planning discussion contribution reserve must be nonnegative."
+            )
+        reserve_tokens = (
+            reserve_contributions
+            * MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS
+        )
+        summarize_method = getattr(
+            self.manager, "summarize_planning_discussion", None
+        )
+
+        def summarize(
+            background: Dict[str, Any],
+            prior_summary: str,
+            records: List[Dict[str, Any]],
+        ) -> str:
+            if not callable(summarize_method):
+                raise ValueError(
+                    "Planning discussion compaction requires the configured HITL manager."
+                )
+            return str(
+                summarize_method(
+                    public_background=background,
+                    prior_summary=prior_summary,
+                    records=records,
+                )
+            )
+        store = record_store or self._planning_discussion_record_store()
+        for template in templates:
+            prepare_planning_discussion_prompt(
+                store=store,
+                session=projected_session,
+                prompt_template=template,
+                public_background=public_background,
+                runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
+                summarize=summarize if callable(summarize_method) else None,
+                additional_records=additional_records,
+                reserve_tokens=reserve_tokens,
+                persist_cache=False,
+                reopen_source_ideas=reopen_source_ideas,
+            )
+
+    def _validate_planning_discussion_task_capacity(
+        self,
+        *,
+        task_context: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> None:
+        """Reject a turn before it makes the next mandatory prompt impossible."""
+
+        from core.hitl_discussion import parse_discussion_task_id
+        from core.hitl_planning_discussion import (
+            PLANNING_DISCUSSION_CONTEXT_MARKER,
+            project_planning_discussion_task_result,
+        )
+
+        next_template = str(
+            self._tool_context.get("planning_discussion_next_prompt_template", "")
+        )
+        final_template = str(
+            self._tool_context.get("planning_discussion_final_prompt_template", "")
+        )
+        background = self._tool_context.get("planning_discussion_public_background")
+        raw_reopen_source_ideas = self._tool_context.get(
+            "planning_discussion_reopen_source_ideas",
+            (),
+        )
+        if (
+            final_template.count(PLANNING_DISCUSSION_CONTEXT_MARKER) != 1
+            or not isinstance(background, dict)
+            or not isinstance(raw_reopen_source_ideas, (list, tuple))
+            or any(not isinstance(record, dict) for record in raw_reopen_source_ideas)
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_unavailable\n"
+                "Runtime cannot verify the remaining planning discussion and formal plan."
+            )
+        try:
+            projected, additional = project_planning_discussion_task_result(
+                task_context["session"],
+                task_id=task_context["task_id"],
+                result=result,
+            )
+            incomplete_contributions = sum(
+                1
+                for task_id, task in projected["tasks"].items()
+                if parse_discussion_task_id(task_id).phase == "response"
+                and task.get("result_record_id") != task_id
+            )
+            templates: list[tuple[Dict[str, Any], str, int]] = []
+            if projected["phase"] != "final_writing":
+                if next_template.count(PLANNING_DISCUSSION_CONTEXT_MARKER) != 1:
+                    raise ValueError(
+                        "Planning discussion next-turn template is unavailable."
+                    )
+                templates.append(
+                    (projected, next_template, incomplete_contributions)
+                )
+            final_projection = json.loads(json.dumps(projected))
+            final_projection["phase"] = "final_writing"
+            templates.append(
+                (final_projection, final_template, incomplete_contributions)
+            )
+            for capacity_session, template, reserve in templates:
+                self._require_planning_discussion_capacity(
+                    projected_session=capacity_session,
+                    prompt_templates=(template,),
+                    public_background=background,
+                    reserve_contributions=reserve,
+                    additional_records=(additional,),
+                    reopen_source_ideas=raw_reopen_source_ideas,
+                )
+        except ValueError as exc:
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_too_large\n"
+                "This result would make a required planning turn or the formal plan "
+                "prompt exceed the verified context budget. Revise this result and retry."
+            ) from exc
 
     def register_proposal_discussion_prompt_template(self, prompt_template: str) -> None:
         """Retain the current final-owner template for reopen capacity validation."""
@@ -5424,49 +6589,71 @@ class HitlRuntime:
                     "reason_for_escalation",
                     "Raised HITL idea",
                 )
-                request_key = self._raised_idea_request_key(raised_idea)
-                prior = self._raised_idea_results.get(request_key)
-                if prior is not None:
-                    return dict(prior)
-                logged = self.resolve_raised_payload(
-                    raised_idea,
-                    provenance=self._tool_context.get("provenance"),
-                )
-                feedback = str(
-                    logged.get("manager_feedback")
-                    or logged.get("human_feedback")
-                    or logged.get("decision")
-                    or ""
-                ).strip()
-                hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
-                if hitl_stage == "review":
-                    prompt_block = self.compose_worker_prompt(
-                        hitl_stage="review",
-                        phase_prompt=self.review_prompt_block(feedback),
-                    )
-                else:
-                    prompt_block = self.compose_worker_prompt(
-                        hitl_stage="execution",
-                        phase_prompt=self.execution_prompt_block(
-                            mode="continue",
-                            feedback=feedback,
-                        ),
-                    )
-                self._update_worker_continuation(
-                    prompt_block=prompt_block,
-                    hitl_stage=hitl_stage,
-                    status="running",
-                )
-                result = {
-                    "idea_id": logged.get("idea_id"),
-                    "decision": logged.get("decision", ""),
-                    "feedback": feedback,
-                    "prompt_block": prompt_block,
-                }
-                self._raised_idea_results[request_key] = dict(result)
-                return result
+                return self._resolve_prepared_tool_raised_payload(raised_idea)
         finally:
             self._worker_request_lock.release()
+
+    def _resume_prepared_raised_payload(self, raised_idea: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                return self._resolve_prepared_tool_raised_payload(dict(raised_idea))
+        finally:
+            self._worker_request_lock.release()
+
+    def _resolve_prepared_tool_raised_payload(
+        self,
+        raised_idea: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        request_key = self._raised_idea_request_key(raised_idea)
+        prior = self._raised_idea_results.get(request_key)
+        if prior is not None:
+            return dict(prior)
+        logged = self.resolve_raised_payload(
+            raised_idea,
+            provenance=self._tool_context.get("provenance"),
+        )
+        result = self._normalize_raised_resolution(logged)
+        self._raised_idea_results[request_key] = dict(result)
+        return result
+
+    def _normalize_raised_resolution(
+        self,
+        resolution: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Convert a manager raised-idea resolution into a worker continuation."""
+        feedback = str(
+            resolution.get("manager_feedback")
+            or resolution.get("human_feedback")
+            or resolution.get("decision")
+            or ""
+        ).strip()
+        hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+        if hitl_stage == "review":
+            prompt_block = self.compose_worker_prompt(
+                hitl_stage="review",
+                phase_prompt=self.review_prompt_block(feedback),
+            )
+        else:
+            prompt_block = self.compose_worker_prompt(
+                hitl_stage="execution",
+                phase_prompt=self.execution_prompt_block(
+                    mode="continue",
+                    feedback=feedback,
+                ),
+            )
+        self._update_worker_continuation(
+            prompt_block=prompt_block,
+            hitl_stage=hitl_stage,
+            status="running",
+        )
+        return {
+            "idea_id": resolution.get("idea_id"),
+            "decision": resolution.get("decision", ""),
+            "feedback": feedback,
+            "prompt_block": prompt_block,
+        }
 
     def log_frontier_decision(
         self,
@@ -6331,6 +7518,13 @@ class HitlRuntime:
             response = pending.get("response")
             if not isinstance(response, dict):
                 raise HitlValidationError("Resolved HITL worker request has no runtime response.")
+            if kind == "raised_idea":
+                raised_idea = pending.get("raised_idea")
+                if not isinstance(raised_idea, dict):
+                    raise HitlValidationError(
+                        "Resolved raised idea request has no worker payload."
+                    )
+                return self._resume_prepared_raised_payload(raised_idea)
             if (
                 kind == "phase_finish"
                 and str(response.get("status", "")).strip() == "feedback"
@@ -6389,7 +7583,7 @@ class HitlRuntime:
             raised_idea = pending.get("raised_idea")
             if not isinstance(raised_idea, dict):
                 raise HitlValidationError("Pending raised idea request has no worker payload.")
-            return self.resolve_tool_raised_payload(raised_idea)
+            return self._resume_prepared_raised_payload(raised_idea)
         if kind == "proposal":
             proposal_payload = pending.get("proposal_payload")
             if not isinstance(proposal_payload, dict):
@@ -6455,6 +7649,7 @@ class HitlRuntime:
 
     def _finish_tool_phase_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            self._require_active_planning_discussion_final_owner_mutation()
             pending = self._pending_worker_command()
             if (
                 isinstance(pending, dict)
@@ -6657,6 +7852,14 @@ class HitlRuntime:
                     raise HitlValidationError(
                         "Manager phase finish review must return status 'approved' or 'feedback'."
                     )
+                if (
+                    status == "feedback"
+                    and hitl_stage == "plan"
+                    and bool(
+                        self._tool_context.get("planning_discussion_final_owner")
+                    )
+                ):
+                    return {**review, "record": dict(finalized["record"])}
                 return review
 
             def persist_scoring_approval(review: Dict[str, Any]) -> Dict[str, Any]:
@@ -6853,6 +8056,23 @@ class HitlRuntime:
         """
         self._require_default_worker_state("worker exit continuation state")
         self._join_live_worker_request_handler()
+        if bool(self._tool_context.get("planning_discussion_final_owner")):
+            task_context = self._planning_discussion_final_owner_state_context()
+            if task_context["session"].get("phase") == "reopen_pending":
+                reconciled = self.reconcile_planning_discussion_reopen()
+                return {
+                    "status": "reopen_discussion",
+                    "approved": False,
+                    "replacement": False,
+                    "reopen_discussion": True,
+                    "reopen_record_id": reconciled["reopen_record_id"],
+                    "worker_exit_warning": (
+                        f"{worker_name} exited after returning plan feedback to the "
+                        "collaborative planning meeting. Runtime retained the accepted handoff."
+                        if not result.get("success")
+                        else ""
+                    ),
+                }
         cancelled = self._cancelled_worker_command_result(
             result,
             phase=phase,
@@ -6977,12 +8197,42 @@ class HitlRuntime:
                 )
         return {**result, "success": False, "hitl": True, "phase": phase, "error": error}
 
-    def _finish_feedback_prompt_block(self, *, hitl_stage: str, feedback: str) -> str:
+    def _finish_feedback_prompt_block(
+        self,
+        *,
+        hitl_stage: str,
+        feedback: str,
+        feedback_ref: str = "",
+    ) -> str:
         if hitl_stage == "plan":
             phase_prompt = self.plan_revision_prompt_block(feedback)
         else:
             phase_prompt = self.review_prompt_block(feedback)
-        return self.compose_worker_prompt(hitl_stage=hitl_stage, phase_prompt=phase_prompt)
+        prompt = self.compose_worker_prompt(
+            hitl_stage=hitl_stage,
+            phase_prompt=phase_prompt,
+        )
+        if (
+            hitl_stage == "plan"
+            and bool(self._tool_context.get("planning_discussion_final_owner"))
+        ):
+            composer = self._tool_context.get("planning_discussion_prompt_composer")
+            if not callable(composer):
+                raise HitlValidationError(
+                    "Collaborative plan feedback has no meeting-context composer."
+                )
+            prompt = str(
+                composer(
+                    prompt,
+                    allow_reopen=True,
+                    reopen_source_idea_ids=(feedback_ref,),
+                )
+            ).strip()
+            if not prompt:
+                raise HitlValidationError(
+                    "Collaborative plan feedback produced an empty continuation."
+                )
+        return prompt
 
     def _normalize_phase_finish_feedback(
         self,
@@ -7008,10 +8258,70 @@ class HitlRuntime:
         next_phase = "plan" if human_resolved_plan else (
             "review" if hitl_stage == "execution" else hitl_stage
         )
-        prompt_block = self._finish_feedback_prompt_block(
-            hitl_stage=next_phase,
-            feedback=feedback,
-        )
+        normalized_record = dict(record) if isinstance(record, dict) else None
+        feedback_ref = str((normalized_record or {}).get("idea_id", "")).strip()
+        if (
+            next_phase == "plan"
+            and bool(self._tool_context.get("planning_discussion_final_owner"))
+            and not feedback_ref
+        ):
+            raise HitlValidationError(
+                "Collaborative plan feedback is missing its finalized feedback idea."
+            )
+        try:
+            prompt_block = self._finish_feedback_prompt_block(
+                hitl_stage=next_phase,
+                feedback=feedback,
+                feedback_ref=feedback_ref,
+            )
+        except ValueError:
+            if not (
+                next_phase == "plan"
+                and bool(self._tool_context.get("planning_discussion_final_owner"))
+            ):
+                raise
+            message = (
+                "Collaborative plan feedback cannot fit the verified worker context "
+                "after meeting compaction. Runtime will restore the clean candidate "
+                "boundary."
+            )
+            self._phase_finish_result = {
+                "called": True,
+                "status": "restart_stage",
+                "hitl_stage": next_phase,
+                "plan_fingerprint": plan_fingerprint,
+                "workspace_fingerprint": workspace_fingerprint,
+                "summary": summary,
+                "related_artifacts": related_artifacts,
+                "manager_feedback": message,
+                "context": str(review.get("context", "")),
+                "next_phase": "complete",
+                "final": True,
+                **(
+                    {"record": normalized_record}
+                    if normalized_record is not None
+                    else {}
+                ),
+            }
+            return self._remember_phase_finish_response(
+                request_key,
+                {
+                    "status": "restart_stage",
+                    "feedback": message,
+                    "next_phase": "complete",
+                    "instruction": (
+                        "Runtime cannot launch the complete collaborative plan revision. "
+                        "Stop this worker session now."
+                    ),
+                    "prompt_block": "",
+                    "final": True,
+                    **(
+                        {"record": normalized_record}
+                        if normalized_record is not None
+                        else {}
+                    ),
+                },
+            )
         current_stage = str(
             self._tool_context.get("hitl_stage", self.current_hitl_stage)
         ).strip()
@@ -7024,7 +8334,6 @@ class HitlRuntime:
                 status="running",
             )
 
-        normalized_record = dict(record) if isinstance(record, dict) else None
         self._phase_finish_result = {
             "called": True,
             "status": "feedback",
@@ -7039,13 +8348,24 @@ class HitlRuntime:
             "final": False,
             **({"record": normalized_record} if normalized_record is not None else {}),
         }
+        collaborative_plan_feedback = bool(
+            next_phase == "plan"
+            and self._tool_context.get("planning_discussion_final_owner")
+        )
         instruction = (
-            "Apply this plan feedback, update the living plan, then "
-            "call hitl-finish-phase again."
-            if human_resolved_plan
+            "Before editing the reviewed plan, decide whether this feedback needs "
+            "another planning discussion round. If needed, call "
+            "hitl-reopen-discussion and stop only when runtime records the handoff. "
+            "Otherwise revise the living plan directly and call hitl-finish-phase again."
+            if collaborative_plan_feedback
             else (
-                "Apply this feedback in the current phase, update the living "
-                "plan/current artifacts, then call hitl-finish-phase again."
+                "Apply this plan feedback, update the living plan, then "
+                "call hitl-finish-phase again."
+                if human_resolved_plan
+                else (
+                    "Apply this feedback in the current phase, update the living "
+                    "plan/current artifacts, then call hitl-finish-phase again."
+                )
             )
         )
         response = {
@@ -7462,6 +8782,7 @@ class HitlRuntime:
                 and record.get("hitl_stage") == "plan"
                 and record.get("level") == "C"
                 and record.get("actor") == expected_actor
+                and not str(record.get("discussion_turn_id", "")).strip()
                 and all(
                     str(record.get(key, "")) == value for key, value in expected_provenance.items()
                 )
@@ -7480,6 +8801,7 @@ class HitlRuntime:
             if (
                 idea_id
                 and record.get("pipeline_stage") == self.pipeline_stage
+                and not str(record.get("discussion_turn_id", "")).strip()
                 and all(
                     str(record.get(key, "")) == value for key, value in expected_provenance.items()
                 )
@@ -7591,7 +8913,7 @@ class HitlRuntime:
                         return
                     if self.path == "/discussion/reopen":
                         runtime._require_worker_command("hitl-reopen-discussion")
-                        result = runtime.reopen_proposal_discussion(payload)
+                        result = runtime.reopen_discussion(payload)
                         self._send_json(
                             200,
                             {
@@ -7663,7 +8985,9 @@ class HitlRuntime:
                             200,
                             {
                                 "ok": True,
-                                "status": result.get("status"),
+                                "status": result.get("status") or "",
+                                "idea_id": result.get("idea_id") or "",
+                                "decision": result.get("decision") or "",
                                 "feedback": result.get("feedback", ""),
                                 "next_phase": result.get("next_phase", ""),
                                 "instruction": result.get("instruction", ""),
@@ -7854,14 +9178,12 @@ class HitlRuntime:
     def _raised_idea_decision_options(
         self,
         raised_idea: Dict[str, Any],
-        review: Dict[str, Any],
     ) -> List[str]:
         if raised_idea["idea_type"] != "decision":
             return []
-        raw_options = review.get("options", raised_idea.get("options"))
         return _validate_substantive_options(
-            raw_options,
-            error_prefix="Manager-reviewed decision",
+            raised_idea.get("options"),
+            error_prefix="Raised decision idea",
         )
 
     def _plan_artifact(self) -> List[Dict[str, str]]:

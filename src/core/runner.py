@@ -53,6 +53,11 @@ from core.compute_backend import (
     without_runtime_compute_backend,
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
+from core.hitl_planning_mode import (
+    PlanningModeConfig,
+    normalize_planning_mode_config,
+    require_managed_autoresearch_planning_mode,
+)
 from core.hitl_proposal_round import (
     ProposalModeConfig,
     normalize_proposal_mode_config,
@@ -407,6 +412,7 @@ class ResearchRunner:
         focused_autoresearch: Optional[bool] = None,
         hitl_work_dir: Optional[Path] = None,
         proposal_mode_config: Optional[ProposalModeConfig] = None,
+        planning_mode_config: Optional[PlanningModeConfig] = None,
         time_limit_seconds: Optional[int] = None,
         workspace_mode: Optional[str] = None,
         _hitl_host_scope: Optional[ExitStack] = None,
@@ -445,6 +451,8 @@ class ResearchRunner:
                 Internal to managed execution; GitHub publication cannot replace it.
             proposal_mode_config: Normalized proposal-generation policy for managed
                 HITL AutoResearch. Internal to managed execution.
+            planning_mode_config: Normalized planning policy for managed HITL
+                AutoResearch. Internal to managed execution.
             workspace_mode: Optional dependency-layout selection. ``native`` keeps
                 the historical root project; ``embedded`` isolates NeuriCo-owned
                 dependencies from an externally owned workspace root.
@@ -493,6 +501,12 @@ class ResearchRunner:
         )
         selected_proposal_mode = require_managed_autoresearch_proposal_mode(
             normalize_proposal_mode_config(proposal_mode_config),
+            managed_autoresearch=bool(
+                hitl_autoresearch or hitl_continue_autoresearch
+            ),
+        )
+        selected_planning_mode = require_managed_autoresearch_planning_mode(
+            normalize_planning_mode_config(planning_mode_config),
             managed_autoresearch=bool(
                 hitl_autoresearch or hitl_continue_autoresearch
             ),
@@ -931,21 +945,25 @@ class ResearchRunner:
             recovered_hitl_attempt = recover_interrupted_hitl_autoresearch_attempt(work_dir)
 
         if recovered_hitl_attempt is not None and recovered_hitl_attempt.recovery_classification in {
-            "pending_worker_request", "frontier_decision_transition",
+            "pending_worker_request",
+            "frontier_decision_transition",
+            "proposal_preparation_transition",
         }:
             preserve_initial_inputs = True
 
         if not hitl_construct_baseline:
-            # Create subdirectories
+            # Runtime-private logs remain available during recovery. Public
+            # workspace scaffolding must not change a reviewed boundary.
             (work_dir / "logs").mkdir(parents=True, exist_ok=True)
-            (work_dir / "results").mkdir(parents=True, exist_ok=True)
-            (work_dir / "artifacts").mkdir(parents=True, exist_ok=True)
-            # Only create notebooks/ when using scribe
-            if use_scribe:
-                (work_dir / "notebooks").mkdir(parents=True, exist_ok=True)
 
-            # Copy helper scripts and backend-selected skills to workspace.
+            # Initialize public scaffolding and copy workspace resources only
+            # when runtime does not own an exact reviewed boundary.
             if not preserve_initial_inputs:
+                (work_dir / "results").mkdir(parents=True, exist_ok=True)
+                (work_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+                # Only create notebooks/ when using scribe
+                if use_scribe:
+                    (work_dir / "notebooks").mkdir(parents=True, exist_ok=True)
                 self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
 
             # Stage user-declared local resources (datasets, functions) into the
@@ -1102,6 +1120,7 @@ class ResearchRunner:
                         recovered_attempt=recovered_hitl_attempt,
                         hitl_mode=selected_hitl_mode,
                         proposal_mode_config=selected_proposal_mode,
+                        planning_mode_config=selected_planning_mode,
                     )
                 else:
                     from core.autoresearch import continue_from_current_best
@@ -1325,6 +1344,7 @@ class ResearchRunner:
                             channel=hitl_host.channel,
                             manager_config=hitl_host.manager.config,
                             hitl_mode=selected_hitl_mode,
+                            planning_mode_config=selected_planning_mode,
                             focused_autoresearch=focused_autoresearch,
                         )
                     else:
@@ -1364,6 +1384,7 @@ class ResearchRunner:
                                 manager_config=hitl_host.manager.config,
                                 hitl_mode=selected_hitl_mode,
                                 proposal_mode_config=selected_proposal_mode,
+                                planning_mode_config=selected_planning_mode,
                             )
                         else:
                             autoresearch_result = continue_from_current_best(**continuation_args)

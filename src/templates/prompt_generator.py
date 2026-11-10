@@ -1001,7 +1001,7 @@ substitutes.
         Returns:
             Complete prompt string for resource finder agent
         """
-        if hitl_phase not in {None, "plan", "execution", "review"}:
+        if hitl_phase not in {None, "plan", "execution", "review", "discussion"}:
             raise ValueError(f"Unsupported HITL resource-finder phase: {hitl_phase}")
         if hitl_phase is not None and not hitl_runtime_completion:
             raise ValueError("HITL resource-finder phases require HITL runtime completion mode.")
@@ -1078,15 +1078,27 @@ RESEARCH DOMAIN:
                         research_context += f"- {dataset}\n"
 
             if 'code_references' in background and background['code_references']:
-                research_context += "\n**CRITICAL - REPOSITORIES TO CLONE**:\n"
-                research_context += "The following repositories are EXPLICITLY SPECIFIED by the user and MUST be cloned:\n"
+                if hitl_phase == "discussion":
+                    research_context += "\n**REQUIRED CODE REFERENCES**:\n"
+                    research_context += (
+                        "The following repositories are required research inputs for "
+                        "the eventual resource-finder plan:\n"
+                    )
+                else:
+                    research_context += "\n**CRITICAL - REPOSITORIES TO CLONE**:\n"
+                    research_context += "The following repositories are EXPLICITLY SPECIFIED by the user and MUST be cloned:\n"
                 for repo in background['code_references']:
                     if isinstance(repo, dict):
                         repo_url = repo.get('repo', repo.get('url', ''))
                         desc = repo.get('description', 'Code repository')
                         research_context += f"- {desc}\n"
                         research_context += f"  URL: {repo_url}\n"
-                        if hitl_phase in {"plan", "review"}:
+                        if hitl_phase == "discussion":
+                            research_context += (
+                                "  → Discuss how the eventual plan should use this "
+                                "repository; do not clone it during this task.\n"
+                            )
+                        elif hitl_phase in {"plan", "review"}:
                             research_context += (
                                 "  → Account for this repository in the living plan; "
                                 "do not clone it in this phase.\n"
@@ -1095,7 +1107,12 @@ RESEARCH DOMAIN:
                             research_context += "  → You MUST clone this repository to code/ directory\n"
                     else:
                         research_context += f"- {repo}\n"
-                if hitl_phase in {"plan", "review"}:
+                if hitl_phase == "discussion":
+                    research_context += (
+                        "\nTreat these repositories as binding inputs when comparing "
+                        "possible resource-finding plans.\n"
+                    )
+                elif hitl_phase in {"plan", "review"}:
                     research_context += (
                         "\nThese repositories are required research inputs. Record their "
                         "execution treatment in the living plan.\n"
@@ -1111,10 +1128,18 @@ RESEARCH DOMAIN:
         local_resources = idea_spec.get('local_resources', {})
         if isinstance(local_resources, dict) and local_resources:
             research_context += "\n**LOCAL RESOURCES - ALREADY STAGED IN THIS WORKSPACE**:\n"
-            research_context += ("The following resources were declared by the submitter and are "
-                                 "already present\nat the paths below. Do NOT search for, download, "
-                                 "or clone substitutes for them.\nVerify each exists and record it "
-                                 "in your resources summary with its usage.\n")
+            if hitl_phase == "discussion":
+                research_context += (
+                    "The following resources were declared by the submitter and are "
+                    "already present at the paths below. Treat them as binding inputs "
+                    "when comparing possible plans; do not replace them or update the "
+                    "resource summary during this discussion task.\n"
+                )
+            else:
+                research_context += ("The following resources were declared by the submitter and are "
+                                     "already present\nat the paths below. Do NOT search for, download, "
+                                     "or clone substitutes for them.\nVerify each exists and record it "
+                                     "in your resources summary with its usage.\n")
             for dataset in local_resources.get('datasets') or []:
                 if isinstance(dataset, dict):
                     research_context += f"- Dataset: {dataset.get('path', 'unknown')}\n"
@@ -1146,7 +1171,7 @@ RESEARCH DOMAIN:
 
         research_context += "\n" + "="*79 + "\n"
 
-        if hitl_phase in {"plan", "review"}:
+        if hitl_phase in {"plan", "review", "discussion"}:
             template = self.render_template(
                 self.load_template("hitl/resource_finder_context.txt"),
                 {"hitl_phase": hitl_phase},
@@ -1181,21 +1206,42 @@ RESEARCH DOMAIN:
         except (TypeError, ValueError):
             max_directions = 3
         max_directions = max(1, min(max_directions, 10))
-        state_contract = self.render_template(
-            self.load_template('agents/state_contract.txt'),
-            {
-                'max_directions': max_directions,
-                'phase_name': 'resource_finder',
-                'focused_autoresearch': bool(focused_autoresearch),
-                'focused_managed_ordinary': bool(focused_managed_ordinary),
-            },
-        )
+        if hitl_phase == "discussion":
+            state_contract = (
+                "RESOURCE-FINDER DIRECTION LIMIT\n"
+                "────────────────────────────────────────────────────────────────────────────────\n\n"
+                "The eventual resource-finder execution may retain at most "
+                f"{max_directions} prioritized research directions.\n"
+            )
+        else:
+            state_contract = self.render_template(
+                self.load_template('agents/state_contract.txt'),
+                {
+                    'max_directions': max_directions,
+                    'phase_name': 'resource_finder',
+                    'focused_autoresearch': bool(focused_autoresearch),
+                    'focused_managed_ordinary': bool(focused_managed_ordinary),
+                },
+            )
         full_prompt = research_context + "\n" + state_contract + "\n" + template
         if invocation_mode == "additive":
-            workspace_label = (
-                "managed research" if focused_managed_ordinary else "AutoResearch"
-            )
-            full_prompt += f"""
+            if hitl_phase == "discussion":
+                full_prompt += """
+
+═══════════════════════════════════════════════════════════════════════════════
+              ADDITIVE INVOCATION — PLANNING CONSTRAINTS
+═══════════════════════════════════════════════════════════════════════════════
+
+The eventual plan must preserve the existing project, environment, dependency
+metadata, and useful resources. It must not depend on recreating `.venv`,
+replacing dependency files, or installing packages. Consider only focused
+resource additions needed for the supplied objective.
+"""
+            else:
+                workspace_label = (
+                    "managed research" if focused_managed_ordinary else "AutoResearch"
+                )
+                full_prompt += f"""
 
 ═══════════════════════════════════════════════════════════════════════════════
               ADDITIVE INVOCATION — EXISTING WORKSPACE IS AUTHORITATIVE

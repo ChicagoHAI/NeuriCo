@@ -23,6 +23,11 @@ from core.hitl_lock import (
 )
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_mode import normalize_hitl_mode
+from core.hitl_planning_mode import (
+    COLLABORATIVE_PLANNING_MODE,
+    normalize_planning_mode_config,
+    require_managed_autoresearch_planning_mode,
+)
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path
 from core.hitl_proposal_round import (
     COLLABORATIVE_PROPOSAL_MODE,
@@ -149,6 +154,16 @@ class HitlRunController:
                 operation == "research" and workflow == "autoresearch"
             ),
         )
+        planning_mode_config = require_managed_autoresearch_planning_mode(
+            normalize_planning_mode_config(
+                payload.get("planning_mode"),
+                participant_count=payload.get("planning_participant_count"),
+                discussion_rounds=payload.get("planning_discussion_rounds"),
+            ),
+            managed_autoresearch=(
+                operation == "research" and workflow == "autoresearch"
+            ),
+        )
 
         with self._lock:
             external_owner = active_hitl_workspace_run(self.work_dir)
@@ -229,7 +244,9 @@ class HitlRunController:
             request_id = uuid.uuid4().hex
             request = {
                 "version": (
-                    6
+                    7
+                    if planning_mode_config.mode == COLLABORATIVE_PLANNING_MODE
+                    else 6
                     if proposal_mode_config.mode == COLLABORATIVE_PROPOSAL_MODE
                     else 5
                 ),
@@ -255,6 +272,14 @@ class HitlRunController:
             elif proposal_mode_config.mode == COLLABORATIVE_PROPOSAL_MODE:
                 request["participant_count"] = proposal_mode_config.participant_count
                 request["discussion_rounds"] = proposal_mode_config.discussion_rounds
+            if planning_mode_config.mode == COLLABORATIVE_PLANNING_MODE:
+                request["planning_mode"] = planning_mode_config.mode
+                request["planning_participant_count"] = (
+                    planning_mode_config.participant_count
+                )
+                request["planning_discussion_rounds"] = (
+                    planning_mode_config.discussion_rounds
+                )
             if operation == "construct_baseline":
                 request["write_paper"] = False
                 request["paper_style"] = None

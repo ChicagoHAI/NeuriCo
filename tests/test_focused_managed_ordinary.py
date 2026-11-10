@@ -370,3 +370,84 @@ def test_launcher_omission_inherits_focused_ordinary_state(tmp_path, monkeypatch
                 "focused_autoresearch": False,
             }
         )
+
+
+@pytest.mark.parametrize("focused", [False, True])
+@pytest.mark.parametrize(
+    "workflow,planning_mode",
+    [("ordinary", "single"), ("autoresearch", "single"), ("autoresearch", "collaborative")],
+)
+def test_resource_stage_preserves_focus_and_planning_routing(
+    tmp_path, monkeypatch, workflow, planning_mode, focused
+):
+    from core import pipeline_orchestrator as pipeline
+    from core.hitl_planning_mode import normalize_planning_mode_config
+
+    planning = normalize_planning_mode_config(planning_mode)
+    orchestrator = ResearchPipelineOrchestrator(
+        work_dir=tmp_path,
+        templates_dir=ROOT / "templates",
+        managed_initial_run=True,
+        hitl_autoresearch=workflow == "autoresearch",
+        focused_autoresearch=focused,
+        planning_mode_config=planning,
+    )
+    rollback = SimpleNamespace(
+        hitl_snapshot=SimpleNamespace(ref="refs/neurico/hitl-rollback/resource-test")
+    )
+    monkeypatch.setattr(orchestrator, "_initial_stage_request", lambda _stage: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_hitl_runtime",
+        lambda _stage: SimpleNamespace(clear_idea_tool_context=lambda: None),
+    )
+    monkeypatch.setattr(orchestrator, "_stage_rollback", lambda *_args: rollback)
+    captured = {}
+
+    def capture_stage(**kwargs):
+        captured.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr(pipeline, "run_resource_finder_hitl", capture_stage)
+    result = orchestrator._run_resource_finder_hitl(IDEA, "codex", None, False)
+
+    assert result["success"] is True
+    assert captured["focused_managed_ordinary"] is (focused and workflow == "ordinary")
+    assert captured["focused_autoresearch"] is (focused and workflow == "autoresearch")
+    assert captured["planning_mode_config"] == planning
+    if planning_mode == "collaborative":
+        assert captured["planning_meeting_owner"] == {
+            "kind": "initial_stage",
+            "pipeline_stage": "resource_finder",
+            "rollback_ref": rollback.hitl_snapshot.ref,
+        }
+        assert captured["planning_meeting_record_root"] == (
+            tmp_path / "logs/hitl/planning_discussions/resource_finder/resource-test"
+        )
+    else:
+        assert captured["planning_meeting_owner"] is None
+        assert captured["planning_meeting_record_root"] is None
+
+
+@pytest.mark.parametrize("focused", [False, True])
+@pytest.mark.parametrize("phase", ["discussion", "plan", "execution", "review"])
+def test_additive_autoresearch_prompt_preserves_discussion_boundary(phase, focused):
+    prompt = PromptGenerator(ROOT / "templates").generate_resource_finder_prompt(
+        IDEA,
+        hitl_runtime_completion=True,
+        hitl_phase=phase,
+        invocation_mode="additive",
+        objective="Resolve a missing piece of evidence.",
+        focused_autoresearch=focused,
+    )
+
+    assert ("FOCUSED HITL AUTORESEARCH SCOPE" in prompt) is focused
+    assert "FOCUSED MANAGED ORDINARY" not in prompt
+    assert "{workspace_label}" not in prompt
+    if phase == "discussion":
+        assert "ADDITIVE INVOCATION — PLANNING CONSTRAINTS" in prompt
+        assert "RESOURCE-FINDER DIRECTION LIMIT" in prompt
+        assert "EXISTING WORKSPACE IS AUTHORITATIVE" not in prompt
+    else:
+        assert "established AutoResearch workspace" in prompt
+        assert "ADDITIVE INVOCATION — PLANNING CONSTRAINTS" not in prompt
