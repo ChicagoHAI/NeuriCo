@@ -207,6 +207,154 @@ async def _emit_trace_preservation_notice(emit: OutputHandler, status: str) -> N
         pass
 
 
+def _prepare_trace_preflight(
+    *,
+    workspace: Path,
+    base_environment: dict[str, str],
+    connection: CodexInferenceConnection,
+) -> tuple[
+    HarborArtifactStore | None,
+    TraceRedactor,
+    WorkspaceBaseline,
+    bool,
+    str | None,
+]:
+    """Prepare bounded trace state without occupying the ACP event loop."""
+    baseline = WorkspaceBaseline(
+        fingerprints={},
+        root_identity=None,
+        complete=False,
+        stop_reason="inventory_failed",
+    )
+    redactor = TraceRedactor()
+    try:
+        artifact_store = HarborArtifactStore.open(DEFAULT_HARBOR_ARTIFACT_ROOT)
+    except Exception as storage_error:
+        return None, redactor, baseline, False, type(storage_error).__name__
+    try:
+        redactor = TraceRedactor.from_sources(
+            base_environment,
+            credential_file=connection.auth_file,
+            additional_values=(connection.token,),
+        )
+        baseline = capture_workspace_baseline(
+            workspace,
+            redactor=redactor,
+        )
+    except Exception as preflight_error:
+        return artifact_store, redactor, baseline, False, type(preflight_error).__name__
+    return artifact_store, redactor, baseline, True, None
+
+
+def _finalize_trace_collection(
+    *,
+    task: HarborAutoResearchTask,
+    artifact_store: HarborArtifactStore | None,
+    output_spool: PrivateOutputSpool | None,
+    run_id: str,
+    trace_preflight_ready: bool,
+    trace_preflight_error_type: str | None,
+    workspace_baseline: WorkspaceBaseline,
+    run_configuration: dict[str, Any],
+    started_at: str,
+    elapsed_seconds: float,
+    outcome: str,
+    return_code: int | None,
+    supervisor_error_type: str | None,
+    redactor: TraceRedactor,
+    child_stopped: bool,
+) -> str:
+    """Finalize private and public trace storage outside the ACP event loop."""
+    trace_status = "scope_complete"
+    scratch: EphemeralRunScratch | None = None
+    try:
+        if child_stopped:
+            try:
+                scratch = EphemeralRunScratch.create(
+                    root=DEFAULT_HARBOR_SCRATCH_ROOT,
+                    run_id=run_id,
+                )
+                if output_spool is not None:
+                    output_spool.transfer_to(scratch)
+            except Exception:
+                scratch = None
+        if not child_stopped or artifact_store is None:
+            return "unavailable"
+
+        transaction: HarborRunBundleTransaction | None = None
+        try:
+            transaction = artifact_store.begin(run_id)
+            if not trace_preflight_ready:
+                write_minimal_harbor_run_bundle(
+                    run_id=run_id,
+                    artifact_dir=transaction.staging_dir,
+                    run_configuration=run_configuration,
+                    started_at=started_at,
+                    elapsed_seconds=elapsed_seconds,
+                    outcome=outcome,
+                    return_code=return_code,
+                    supervisor_error_type=supervisor_error_type,
+                    export_error_type=(
+                        trace_preflight_error_type or "TracePreflightInitializationError"
+                    ),
+                    redactor=redactor,
+                )
+                trace_status = "partial"
+            else:
+                manifest = export_harbor_research_artifacts(
+                    run_id=run_id,
+                    workspace=task.workspace,
+                    workspace_baseline=workspace_baseline,
+                    artifact_dir=transaction.staging_dir,
+                    project_root=_PROJECT_ROOT,
+                    instruction=task.instruction,
+                    run_configuration=run_configuration,
+                    started_at=started_at,
+                    elapsed_seconds=elapsed_seconds,
+                    outcome=outcome,
+                    return_code=return_code,
+                    supervisor_error_type=supervisor_error_type,
+                    redactor=redactor,
+                    scratch=scratch,
+                )
+                if manifest.get("collection_status") != "scope_complete":
+                    trace_status = "partial"
+            transaction.commit()
+        except Exception as export_error:
+            if transaction is None:
+                return "unavailable"
+            try:
+                artifact_dir = transaction.reset()
+                write_minimal_harbor_run_bundle(
+                    run_id=run_id,
+                    artifact_dir=artifact_dir,
+                    run_configuration=run_configuration,
+                    started_at=started_at,
+                    elapsed_seconds=elapsed_seconds,
+                    outcome=outcome,
+                    return_code=return_code,
+                    supervisor_error_type=supervisor_error_type,
+                    export_error_type=type(export_error).__name__,
+                    redactor=redactor,
+                )
+                transaction.commit()
+                trace_status = "partial"
+            except Exception:
+                transaction.abort()
+                return "unavailable"
+        return trace_status
+    finally:
+        if artifact_store is not None:
+            artifact_store.close()
+        if scratch is not None:
+            try:
+                scratch.finalize()
+            except Exception:
+                pass
+        if output_spool is not None:
+            output_spool.close()
+
+
 async def run_autoresearch_process(
     *,
     task: HarborAutoResearchTask,
@@ -239,18 +387,33 @@ async def run_autoresearch_process(
         "time_limit_seconds": time_limit_seconds,
         "workspace_mode": "embedded",
     }
-    workspace_baseline = WorkspaceBaseline(
-        fingerprints={},
-        root_identity=None,
-        complete=False,
-        stop_reason="inventory_failed",
+    preflight_task = asyncio.create_task(
+        asyncio.to_thread(
+            _prepare_trace_preflight,
+            workspace=task.workspace,
+            base_environment=base_environment,
+            connection=connection,
+        )
     )
-    redactor = TraceRedactor()
-    trace_preflight_ready = False
-    trace_preflight_error_type: str | None = None
-    artifact_store: HarborArtifactStore | None = None
+    try:
+        (
+            artifact_store,
+            redactor,
+            workspace_baseline,
+            trace_preflight_ready,
+            trace_preflight_error_type,
+        ) = await asyncio.shield(preflight_task)
+    except asyncio.CancelledError:
+        try:
+            cancelled_preflight = await preflight_task
+        except Exception:
+            pass
+        else:
+            if cancelled_preflight[0] is not None:
+                cancelled_preflight[0].close()
+        raise
+
     output_spool: PrivateOutputSpool | None = None
-    scratch: EphemeralRunScratch | None = None
 
     try:
         output_spool = PrivateOutputSpool.create()
@@ -259,33 +422,15 @@ async def run_autoresearch_process(
         # run or the independently sanitized public bundle.
         output_spool = None
 
-    # Retain parent-held directory identities before the child can replace
-    # filesystem paths. Harbor's artifact channel remains agent-controlled;
-    # these handles protect the collector's own unpublished transaction, not a
-    # deployment-level trust boundary.
     try:
-        artifact_store = HarborArtifactStore.open(DEFAULT_HARBOR_ARTIFACT_ROOT)
-    except Exception as storage_error:
-        trace_preflight_error_type = type(storage_error).__name__
-    else:
-        # Capture preparation is observational. If the private redactor or
-        # baseline inventory fails, the established store can still publish a
-        # metadata-only bundle after the child stops.
         try:
-            redactor = TraceRedactor.from_sources(
-                base_environment,
-                credential_file=connection.auth_file,
-                additional_values=(connection.token,),
-            )
-            workspace_baseline = capture_workspace_baseline(
-                task.workspace,
-                redactor=redactor,
-            )
-            trace_preflight_ready = True
-        except Exception as trace_preflight_error:
-            trace_preflight_error_type = type(trace_preflight_error).__name__
+            cancelled_before_spawn = bool(cancellation_requested and cancellation_requested())
+        except Exception:
+            cancelled_before_spawn = False
+        if cancelled_before_spawn:
+            return_code = 1
+            return return_code
 
-    try:
         with tempfile.TemporaryDirectory(prefix="neurico-harbor-") as control_dir_value:
             control_dir = Path(control_dir_value)
             instruction_file = control_dir / "instruction.txt"
@@ -373,116 +518,56 @@ async def run_autoresearch_process(
         if return_code is None and process is not None:
             return_code = process.returncode
 
-        trace_status = "scope_complete"
-        # Writing even sanitized workspace data while the child remains alive
-        # would violate the producer boundary.
         child_stopped = process is None or process.returncode is not None
-        if child_stopped:
-            try:
-                scratch = EphemeralRunScratch.create(
-                    root=DEFAULT_HARBOR_SCRATCH_ROOT,
-                    run_id=run_id,
-                )
-                if output_spool is not None:
-                    output_spool.transfer_to(scratch)
-            except Exception:
-                # The public trace remains independently collectable.
-                scratch = None
-        if not child_stopped:
-            trace_status = "unavailable"
-        elif artifact_store is None:
-            trace_status = "unavailable"
+        try:
+            was_cancelled = bool(cancellation_requested and cancellation_requested())
+        except Exception:
+            was_cancelled = False
+        if was_cancelled:
+            outcome = "cancelled"
+        elif process is None:
+            outcome = "spawn_failure"
+        elif forced_termination:
+            outcome = "forced_timeout"
+        elif supervisor_error_type is not None:
+            outcome = "supervisor_error"
+        elif return_code == 0:
+            outcome = "success"
+        elif return_code == _TIME_LIMIT_EXIT_CODE:
+            outcome = "time_limit"
         else:
+            outcome = "failed"
+
+        finalize_task = asyncio.create_task(
+            asyncio.to_thread(
+                _finalize_trace_collection,
+                task=task,
+                artifact_store=artifact_store,
+                output_spool=output_spool,
+                run_id=run_id,
+                trace_preflight_ready=trace_preflight_ready,
+                trace_preflight_error_type=trace_preflight_error_type,
+                workspace_baseline=workspace_baseline,
+                run_configuration=run_configuration,
+                started_at=started_at,
+                elapsed_seconds=time.monotonic() - started_monotonic,
+                outcome=outcome,
+                return_code=return_code,
+                supervisor_error_type=supervisor_error_type,
+                redactor=redactor,
+                child_stopped=child_stopped,
+            )
+        )
+        try:
+            trace_status = await asyncio.shield(finalize_task)
+        except asyncio.CancelledError:
             try:
-                was_cancelled = bool(cancellation_requested and cancellation_requested())
-            except Exception:
-                was_cancelled = False
-            if process is None:
-                outcome = "spawn_failure"
-            elif was_cancelled:
-                outcome = "cancelled"
-            elif forced_termination:
-                outcome = "forced_timeout"
-            elif supervisor_error_type is not None:
-                outcome = "supervisor_error"
-            elif return_code == 0:
-                outcome = "success"
-            elif return_code == _TIME_LIMIT_EXIT_CODE:
-                outcome = "time_limit"
-            else:
-                outcome = "failed"
-            elapsed_seconds = time.monotonic() - started_monotonic
-            transaction: HarborRunBundleTransaction | None = None
-            try:
-                transaction = artifact_store.begin(run_id)
-                if not trace_preflight_ready:
-                    manifest = write_minimal_harbor_run_bundle(
-                        run_id=run_id,
-                        artifact_dir=transaction.staging_dir,
-                        run_configuration=run_configuration,
-                        started_at=started_at,
-                        elapsed_seconds=elapsed_seconds,
-                        outcome=outcome,
-                        return_code=return_code,
-                        supervisor_error_type=supervisor_error_type,
-                        export_error_type=(
-                            trace_preflight_error_type or "TracePreflightInitializationError"
-                        ),
-                        redactor=redactor,
-                    )
-                    trace_status = "partial"
-                else:
-                    manifest = export_harbor_research_artifacts(
-                        run_id=run_id,
-                        workspace=task.workspace,
-                        workspace_baseline=workspace_baseline,
-                        artifact_dir=transaction.staging_dir,
-                        project_root=_PROJECT_ROOT,
-                        instruction=task.instruction,
-                        run_configuration=run_configuration,
-                        started_at=started_at,
-                        elapsed_seconds=elapsed_seconds,
-                        outcome=outcome,
-                        return_code=return_code,
-                        supervisor_error_type=supervisor_error_type,
-                        redactor=redactor,
-                        scratch=scratch,
-                    )
-                    if manifest.get("collection_status") != "scope_complete":
-                        trace_status = "partial"
-                transaction.commit()
-            except Exception as export_error:
-                if transaction is not None:
-                    try:
-                        artifact_dir = transaction.reset()
-                        manifest = write_minimal_harbor_run_bundle(
-                            run_id=run_id,
-                            artifact_dir=artifact_dir,
-                            run_configuration=run_configuration,
-                            started_at=started_at,
-                            elapsed_seconds=elapsed_seconds,
-                            outcome=outcome,
-                            return_code=return_code,
-                            supervisor_error_type=supervisor_error_type,
-                            export_error_type=type(export_error).__name__,
-                            redactor=redactor,
-                        )
-                        transaction.commit()
-                        trace_status = "partial"
-                    except Exception:
-                        transaction.abort()
-                        trace_status = "unavailable"
-                else:
-                    trace_status = "unavailable"
-        if artifact_store is not None:
-            artifact_store.close()
-        if scratch is not None:
-            try:
-                scratch.finalize()
+                await finalize_task
             except Exception:
                 pass
-        if output_spool is not None:
-            output_spool.close()
+            raise
+        except Exception:
+            trace_status = "unavailable"
         await _emit_trace_preservation_notice(emit, trace_status)
 
 

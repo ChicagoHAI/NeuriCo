@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -172,7 +173,7 @@ def test_artifact_file_write_never_replaces_complete_file_with_partial_output(
 @pytest.mark.parametrize(
     ("payload", "error"),
     [
-        ("unattested file\n", "unexpected or missing"),
+        ("unattested file\n", "unexpected artifact"),
         ("configured-secret=abc123\n", "changed after sanitization"),
         ("harmless-looking replacement\n", "parent write ledger"),
     ],
@@ -201,6 +202,24 @@ def test_manifest_rejects_unowned_or_post_sanitization_payloads(
         )
 
 
+def test_manifest_rejects_missing_expected_artifacts(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    (artifact_dir / "run.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="missing an expected artifact"):
+        artifacts_module._write_manifest(
+            artifact_dir,
+            run_id="test-run",
+            redactor=TraceRedactor(),
+            collection_status="scope_complete",
+            expected_hashes={
+                "run.json": sha256(b"{}\n").hexdigest(),
+                "missing.json": sha256(b"{}\n").hexdigest(),
+            },
+        )
+
+
 def test_trace_redactor_covers_unlabelled_secret_forms() -> None:
     database_url = "postgresql://alice:opaque-db-password@example.invalid/research"
     web_url = "https://bob:opaque-web-password@example.invalid/private"
@@ -226,6 +245,53 @@ def test_trace_redactor_covers_unlabelled_secret_forms() -> None:
     assert "REDACTED_CONFIGURED_SECRET" in rendered
     assert "REDACTED_URI_CREDENTIALS" in rendered
     assert "REDACTED_JSON_WEB_TOKEN" in rendered
+
+
+@pytest.mark.parametrize(
+    ("payload", "suffix", "secret"),
+    [
+        ('{"apiKey":"opaque-camel-api-value"}\n', ".json", "opaque-camel-api-value"),
+        (
+            '{"accessToken":"opaque-camel-access-value"}\n',
+            ".jsonl",
+            "opaque-camel-access-value",
+        ),
+        ("clientSecret: opaque-camel-client-value\n", ".yaml", "opaque-camel-client-value"),
+        (
+            "AWSSecretAccessKey=opaque-pascal-aws-value\n",
+            ".log",
+            "opaque-pascal-aws-value",
+        ),
+    ],
+)
+def test_trace_redactor_covers_camel_case_sensitive_fields(
+    payload: str,
+    suffix: str,
+    secret: str,
+) -> None:
+    safe_payload = artifacts_module._safe_text_payload(
+        payload.encode("utf-8"),
+        suffix,
+        TraceRedactor(),
+    )
+
+    assert safe_payload is not None
+    rendered = safe_payload[0].decode("utf-8")
+    assert secret not in rendered
+    assert "REDACTED_SECRET_FIELD" in rendered
+
+
+def test_camel_case_token_metadata_remains_public() -> None:
+    payload = '{"tokenCount":17,"tokenBudget":100}\n'
+    safe_payload = artifacts_module._safe_text_payload(
+        payload.encode("utf-8"),
+        ".json",
+        TraceRedactor(),
+    )
+
+    assert safe_payload is not None
+    rendered = json.loads(safe_payload[0])
+    assert rendered == {"tokenBudget": 100, "tokenCount": 17}
 
 
 def test_trace_redactor_covers_short_configured_secrets_and_fails_closed_below_limit() -> None:
@@ -1653,6 +1719,149 @@ def test_parent_owns_post_stop_trace_finalization(
         )
         with pytest.raises(ValueError, match="absent from its manifest"):
             artifacts_module.verify_trace_bundle(artifact_dir=run_dir)
+
+    asyncio.run(exercise())
+
+
+def test_trace_preflight_keeps_event_loop_responsive_to_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        artifact_root = tmp_path / "artifacts"
+        capture_started = threading.Event()
+        release_capture = threading.Event()
+        cancelled = False
+        original_capture = agent_module.capture_workspace_baseline
+
+        def blocking_capture(*args: Any, **kwargs: Any):
+            assert threading.current_thread() is not threading.main_thread()
+            capture_started.set()
+            assert release_capture.wait(timeout=5), "preflight blocked the event loop"
+            return original_capture(*args, **kwargs)
+
+        async def unexpected_spawn(*_args: Any, **_kwargs: Any):
+            raise AssertionError("cancelled preflight must not spawn NeuriCo")
+
+        monkeypatch.setattr(agent_module, "DEFAULT_HARBOR_ARTIFACT_ROOT", artifact_root)
+        monkeypatch.setattr(agent_module, "capture_workspace_baseline", blocking_capture)
+        monkeypatch.setattr(agent_module.asyncio, "create_subprocess_exec", unexpected_spawn)
+        run = asyncio.create_task(
+            run_autoresearch_process(
+                task=HarborAutoResearchTask(
+                    instruction="Run the benchmark.",
+                    workspace=workspace,
+                ),
+                connection=CodexInferenceConnection(
+                    requested_model="openai/test-model",
+                    mode="hosted-gateway",
+                    token="not-used",
+                    base_url="https://example.invalid/v1",
+                ),
+                base_environment={},
+                iterations=1,
+                time_limit_seconds=None,
+                run_id="cancelled-preflight",
+                emit=lambda _text: asyncio.sleep(0),
+                register_process=lambda _process: False,
+                cancellation_requested=lambda: cancelled,
+            )
+        )
+
+        deadline = time.monotonic() + 5
+        while not capture_started.is_set():
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.01)
+        cancelled = True
+        release_capture.set()
+
+        assert await asyncio.wait_for(run, timeout=5) == 1
+        run_record = json.loads((artifact_root / "cancelled-preflight/run.json").read_text())
+        assert run_record["outcome"] == "cancelled"
+
+    asyncio.run(exercise())
+
+
+def test_trace_finalization_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        artifact_root = tmp_path / "artifacts"
+        export_started = threading.Event()
+        release_export = threading.Event()
+        original_create = asyncio.create_subprocess_exec
+        original_export = agent_module.export_harbor_research_artifacts
+
+        async def fake_create(*_args: Any, **kwargs: Any):
+            return await original_create(
+                sys.executable,
+                "-c",
+                "raise SystemExit(0)",
+                cwd=kwargs["cwd"],
+                env=kwargs["env"],
+                stdout=kwargs["stdout"],
+                stderr=kwargs["stderr"],
+                start_new_session=kwargs["start_new_session"],
+            )
+
+        def blocking_export(**kwargs: Any):
+            assert threading.current_thread() is not threading.main_thread()
+            export_started.set()
+            assert release_export.wait(timeout=5), "trace export blocked the event loop"
+            return original_export(**kwargs)
+
+        monkeypatch.setattr(agent_module, "DEFAULT_HARBOR_ARTIFACT_ROOT", artifact_root)
+        monkeypatch.setattr(
+            agent_module,
+            "build_autoresearch_environment",
+            lambda base_environment, connection, **_kwargs: dict(base_environment),
+        )
+        monkeypatch.setattr(agent_module.asyncio, "create_subprocess_exec", fake_create)
+        monkeypatch.setattr(
+            agent_module,
+            "export_harbor_research_artifacts",
+            blocking_export,
+        )
+        run = asyncio.create_task(
+            run_autoresearch_process(
+                task=HarborAutoResearchTask(
+                    instruction="Run the benchmark.",
+                    workspace=workspace,
+                ),
+                connection=CodexInferenceConnection(
+                    requested_model="openai/test-model",
+                    mode="hosted-gateway",
+                    token="not-used",
+                    base_url="https://example.invalid/v1",
+                ),
+                base_environment={},
+                iterations=1,
+                time_limit_seconds=None,
+                run_id="threaded-finalization",
+                emit=lambda _text: asyncio.sleep(0),
+                register_process=lambda _process: False,
+            )
+        )
+
+        deadline = time.monotonic() + 5
+        while not export_started.is_set():
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.01)
+        event_loop_progress = asyncio.Event()
+        asyncio.get_running_loop().call_soon(event_loop_progress.set)
+        try:
+            await asyncio.wait_for(event_loop_progress.wait(), timeout=1)
+        finally:
+            release_export.set()
+
+        assert await asyncio.wait_for(run, timeout=5) == 0
+        manifest = json.loads((artifact_root / "threaded-finalization/manifest.json").read_text())
+        assert manifest["collection_status"] == "scope_complete"
 
     asyncio.run(exercise())
 

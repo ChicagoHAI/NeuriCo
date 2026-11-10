@@ -135,8 +135,9 @@ for human input.
   evidence and pass through the same text sanitizer.
 - JSON and JSONL are redacted structurally. Free-form text and YAML-like
   assignments redact common prefixed credential names such as
-  `OPENAI_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `client_secret`, and
-  `private_key`, together with configured environment credential values,
+  `OPENAI_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `client_secret`, `apiKey`,
+  `accessToken`, and `private_key`, together with configured environment
+  credential values,
   credential-bearing URIs, JSON Web Tokens, bearer tokens, nested sensitive
   blocks, raw private-key blocks, and recognizable provider tokens. Direnv
   sources and caches (`.envrc` and `.direnv/`) are never artifact sources.

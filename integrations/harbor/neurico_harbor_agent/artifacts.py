@@ -39,6 +39,8 @@ DEFAULT_HARBOR_ARTIFACT_ROOT = Path("/logs/artifacts/neurico")
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _FIELD_TOKEN = re.compile(r"[a-z0-9]+")
+_ACRONYM_FIELD_BOUNDARY = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_FIELD_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
 _LINE_ASSIGNMENT = re.compile(
     r"^(?P<prefix>[ \t]*(?:-[ \t]*)?(?P<quote>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)"
     r"(?P=quote)[ \t]*[:=][ \t]*)(?P<value>[^\r\n]*)(?P<newline>\r?\n|$)"
@@ -624,7 +626,9 @@ class HarborRunBundleTransaction:
 
 
 def _field_tokens(field_name: str) -> tuple[str, ...]:
-    return tuple(_FIELD_TOKEN.findall(field_name.lower()))
+    separated = _ACRONYM_FIELD_BOUNDARY.sub(r"\1_\2", field_name)
+    separated = _CAMEL_FIELD_BOUNDARY.sub(r"\1_\2", separated)
+    return tuple(_FIELD_TOKEN.findall(separated.lower()))
 
 
 def _is_sensitive_field_name(field_name: str) -> bool:
@@ -1909,7 +1913,8 @@ def _artifact_manifest(
     expected_hashes: Mapping[str, str],
     redactor: TraceRedactor,
 ) -> list[dict[str, Any]]:
-    payloads: dict[str, bytes] = {}
+    remaining = set(expected_hashes)
+    records: list[dict[str, Any]] = []
     for path in sorted(artifact_dir.rglob("*")):
         path_stat = path.lstat()
         if stat.S_ISLNK(path_stat.st_mode):
@@ -1921,24 +1926,27 @@ def _artifact_manifest(
         relative = path.relative_to(artifact_dir).as_posix()
         if relative == "manifest.json":
             continue
+        if relative not in remaining:
+            raise OSError("Harbor trace staging contains an unexpected artifact")
         payload = path.read_bytes()
         safe_payload = _safe_text_payload(payload, path.suffix, redactor)
         if safe_payload is None or safe_payload[0] != payload:
             raise ValueError("Harbor trace staging changed after sanitization")
-        payloads[relative] = payload
-    if set(payloads) != set(expected_hashes):
-        raise OSError("Harbor trace staging contains an unexpected or missing artifact")
-    for relative, payload in payloads.items():
-        if sha256(payload).hexdigest() != expected_hashes[relative]:
+        digest = sha256(payload).hexdigest()
+        if digest != expected_hashes[relative]:
             raise ValueError("Harbor trace staging does not match its parent write ledger")
-    return [
-        {
-            "path": relative,
-            "bytes": len(payload),
-            "sha256": sha256(payload).hexdigest(),
-        }
-        for relative, payload in sorted(payloads.items())
-    ]
+        records.append(
+            {
+                "path": relative,
+                "bytes": len(payload),
+                "sha256": digest,
+            }
+        )
+        remaining.remove(relative)
+        del safe_payload, payload
+    if remaining:
+        raise OSError("Harbor trace staging is missing an expected artifact")
+    return records
 
 
 def _write_manifest(
