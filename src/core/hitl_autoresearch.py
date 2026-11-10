@@ -71,6 +71,13 @@ from core.hitl_paths import (
     hitl_stop_request_path,
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
+from core.hitl_planning_mode import (
+    COLLABORATIVE_PLANNING_MODE,
+    PENDING_PLANNING_POLICY_FIELD,
+    PlanningModeConfig,
+    normalize_planning_mode_config,
+    normalize_pending_planning_policy,
+)
 from core.hitl_proposal_round import (
     COLLABORATIVE_PROPOSAL_MODE,
     INDEPENDENT_RANKED_PROPOSAL_MODE,
@@ -406,6 +413,7 @@ def run_fresh_hitl_autoresearch_initial_node(
     channel: Optional[Any] = None,
     manager_config: Optional[Dict[str, Any]] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
+    planning_mode_config: Optional[PlanningModeConfig] = None,
     focused_autoresearch: Optional[bool] = None,
 ) -> InitialAutoResearchNodeResult:
     """Run the initial scored experiment through the HITL pipeline."""
@@ -448,6 +456,7 @@ def run_fresh_hitl_autoresearch_initial_node(
         hitl_manager_config=manager_config,
         hitl_autoresearch=True,
         hitl_mode=selected_hitl_mode,
+        planning_mode_config=planning_mode_config,
         focused_autoresearch=focused_autoresearch,
     ).run_pipeline(
         idea=idea,
@@ -1147,6 +1156,14 @@ def _archive_failed_hitl_attempt(
             shutil.copytree(
                 discussion,
                 archive_dir / "proposal_discussion",
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
+        planning_discussion = Path(source_attempt_dir) / "planning_discussion"
+        if planning_discussion.is_dir() and not planning_discussion.is_symlink():
+            shutil.copytree(
+                planning_discussion,
+                archive_dir / "planning_discussion",
                 dirs_exist_ok=True,
                 symlinks=True,
             )
@@ -2078,13 +2095,490 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     and prepared_sha
                     and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
                 )
+    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+    planning_discussion_present = bool(
+        isinstance(preparation_action, dict)
+        and "planning_discussion" in preparation_action
+    )
+    planning_discussion_is_exact = False
+    planning_read_only_workspace_is_exact = False
+    planning_reopen_workspace_is_exact = False
+    planning_discussion_phase: Optional[str] = None
+    planning_admitted_proposal_id = ""
+    if planning_discussion_present and isinstance(preparation_action, dict):
+        raw_planning = preparation_action.get("planning_discussion")
+        if isinstance(raw_planning, dict):
+            try:
+                from core.hitl_planning_discussion import (
+                    PlanningDiscussionRecordStore,
+                    permitted_planning_discussion_record_ids,
+                )
+
+                durable_planning = runtime_state.planning_discussion_snapshot(
+                    parent_node_sha=str(
+                        preparation_action.get("parent_node_sha", "")
+                    ).strip(),
+                    preparation_attempt_id=str(
+                        preparation_action.get("attempt_id", "")
+                    ).strip(),
+                    candidate_attempt_id=attempt_dir.name,
+                )
+                planning_discussion_phase = str(
+                    durable_planning.get("phase", "")
+                ).strip()
+                planning_admitted_proposal_id = str(
+                    durable_planning.get("admitted_proposal_idea_id", "")
+                ).strip()
+                planning_store = PlanningDiscussionRecordStore(attempt_dir)
+                planning_records = planning_store.records()
+                planning_by_id = {
+                    str(record.get("record_id", "")).strip(): record
+                    for record in planning_records
+                }
+                planning_store.ordered_records(
+                    permitted_planning_discussion_record_ids(durable_planning)
+                )
+                for task_id, task in durable_planning["tasks"].items():
+                    record = planning_by_id.get(task_id)
+                    result_record_id = str(
+                        task.get("result_record_id") or ""
+                    ).strip()
+                    pending = task.get("pending_finalization")
+                    if result_record_id:
+                        if record is None or result_record_id != task_id:
+                            raise RuntimeError(
+                                "Planning discussion task result record is missing."
+                            )
+                        if (
+                            record["kind"] == "decision"
+                            and record["result"].get("choice")
+                            != task.get("choice")
+                        ):
+                            raise RuntimeError(
+                                "Planning discussion decision does not match durable "
+                                "scheduling state."
+                            )
+                    elif pending is not None:
+                        if record is not None and record.get("result") != pending:
+                            raise RuntimeError(
+                                "Planning discussion task record conflicts with durable intent."
+                            )
+                    elif record is not None:
+                        raise RuntimeError(
+                            "Planning discussion contains an unreferenced task record."
+                        )
+                git_state = HitlGitStateStore(work_dir)
+                if planning_discussion_phase in {
+                    "initial",
+                    "opening",
+                    "response",
+                    "decision",
+                }:
+                    whiteboard_sha = str(
+                        durable_planning.get("whiteboard_boundary_sha", "")
+                    ).strip()
+                    planning_whiteboard_is_exact = bool(
+                        git_state.hitl_autoresearch_whiteboard_history_contains(
+                            whiteboard_sha
+                        )
+                        and git_state.hitl_autoresearch_whiteboard_matches_commit(
+                            whiteboard_sha
+                        )
+                    )
+                    planning_read_only_workspace_is_exact = bool(
+                        str(
+                            durable_planning.get("workspace_fingerprint", "")
+                        ).strip()
+                        == HitlWorkspaceWriteGuard.public_fingerprint(
+                            work_dir,
+                            scope=durable_planning.get(
+                                "workspace_fingerprint_scope"
+                            ),
+                        )
+                    )
+                elif planning_discussion_phase == "final_writing":
+                    planning_whiteboard_is_exact = True
+                elif planning_discussion_phase == "reopen_pending":
+                    handoff = durable_planning.get("reopen_handoff")
+                    if not isinstance(handoff, dict):
+                        raise RuntimeError(
+                            "Planning discussion reopen handoff is missing."
+                        )
+                    reopen_record = planning_by_id.get(
+                        str(handoff.get("reopen_record_id", "")).strip()
+                    )
+                    pending = handoff.get("pending_finalization")
+                    if pending is not None:
+                        if (
+                            reopen_record is not None
+                            and reopen_record.get("result") != pending
+                        ):
+                            raise RuntimeError(
+                                "Planning discussion reopen record conflicts with durable intent."
+                            )
+                    elif (
+                        not isinstance(reopen_record, dict)
+                        or reopen_record.get("result", {}).get("feedback_ref")
+                        != handoff.get("feedback_ref")
+                    ):
+                        raise RuntimeError(
+                            "Planning discussion reopen record does not match its handoff."
+                        )
+                    reopen_boundary = (
+                        runtime_state.planning_discussion_reopen_recovery_snapshot(
+                            parent_node_sha=str(
+                                preparation_action.get("parent_node_sha", "")
+                            ).strip(),
+                            preparation_attempt_id=str(
+                                preparation_action.get("attempt_id", "")
+                            ).strip(),
+                            candidate_attempt_id=attempt_dir.name,
+                        )
+                    )
+                    if reopen_boundary.get("handoff") != handoff:
+                        raise RuntimeError(
+                            "Planning discussion reopen handoff changed during recovery."
+                        )
+                    planning_reopen_workspace_is_exact = (
+                        HitlWorkspaceWriteGuard.public_fingerprint(
+                            work_dir,
+                            scope=handoff.get("workspace_fingerprint_scope"),
+                        )
+                        == handoff["workspace_fingerprint"]
+                    )
+                    feedback_record = reopen_boundary.get("feedback_record")
+                    feedback_ref = str(handoff.get("feedback_ref", "")).strip()
+                    logged_feedback = [
+                        record
+                        for record in HitlIdeaLog(work_dir).records()
+                        if record.get("idea_id") == feedback_ref
+                    ]
+                    if len(logged_feedback) != 1 or HitlIdeaLog.logical_payload(
+                        logged_feedback[0]
+                    ) != HitlIdeaLog.logical_payload(feedback_record):
+                        raise RuntimeError(
+                            "Planning discussion reopen feedback idea is missing or "
+                            "inconsistent."
+                        )
+                    current_whiteboard_sha = (
+                        git_state.hitl_autoresearch_whiteboard_history_sha()
+                    )
+                    planning_whiteboard_is_exact = (
+                        git_state.hitl_autoresearch_whiteboard_matches_commit(
+                            current_whiteboard_sha
+                        )
+                    )
+                else:
+                    planning_whiteboard_is_exact = False
+            except (
+                HitlRuntimeStateError,
+                HitlGitStateError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                pass
+            else:
+                prepared_sha = _resolved_proposal_base(preparation_action)
+                planning_discussion_is_exact = bool(
+                    preparation_action.get("status") == "resolved"
+                    and str(preparation_action.get("parent_node_sha", "")).strip()
+                    == current_best_sha
+                    and attempt_dir.parent.name == current_best_sha
+                    and durable_planning == raw_planning
+                    and planning_whiteboard_is_exact
+                    and prepared_sha
+                    and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
+                )
+    stage_planning_attachment = runtime_state.stage_planning_discussion_attachment()
+    stage_planning_present = stage_planning_attachment is not None
+    stage_planning_is_exact = False
+    stage_planning_phase: Optional[str] = None
+    stage_planning_approved_plan_handoff = False
+    if stage_planning_present and isinstance(preparation_action, dict):
+        try:
+            if (
+                ranked_round_present
+                or discussion_present
+                or planning_discussion_present
+            ):
+                raise RuntimeError(
+                    "Stage and candidate coordination cannot own one attempt together."
+                )
+            recovery = preparation_action.get("recovery")
+            if (
+                not isinstance(recovery, dict)
+                or recovery.get("stage") != "additional_agent"
+            ):
+                raise RuntimeError(
+                    "Stage planning meeting has no additional-agent recovery boundary."
+                )
+            HitlStageRollback.from_descriptor(work_dir, recovery)
+            expected_provenance = {
+                "parent_node_id": str(
+                    preparation_action.get("parent_node_sha", "")
+                ).strip(),
+                "attempt_id": str(preparation_action.get("attempt_id", "")).strip(),
+                "additional_agent_ordinal": str(
+                    preparation_action.get("additional_agent_ordinal", "")
+                ).strip(),
+            }
+            expected_owner = {
+                "kind": "additional_agent",
+                "pipeline_stage": "resource_finder",
+                "rollback_ref": str(recovery.get("hitl_snapshot_ref", "")).strip(),
+                "parent_node_id": expected_provenance["parent_node_id"],
+                "attempt_id": expected_provenance["attempt_id"],
+                "additional_agent_ordinal": int(
+                    preparation_action.get("additional_agent_ordinal", 0)
+                ),
+            }
+            if stage_planning_attachment.get("owner") != expected_owner:
+                raise RuntimeError(
+                    "Stage planning meeting belongs to another additional-agent invocation."
+                )
+            decision = preparation_action.get("decision")
+            if (
+                preparation_action.get("kind") != "prepare_proposal"
+                or not isinstance(decision, dict)
+                or decision.get("choice") != "call_additional_agent"
+                or decision.get("agent") != "resource_finder"
+            ):
+                raise RuntimeError(
+                    "Stage planning meeting has no owning resource-finder decision."
+                )
+            session = runtime_state.stage_planning_discussion_snapshot(
+                owner=expected_owner
+            )
+            stage_planning_phase = str(session.get("phase", "")).strip()
+            continuation = runtime_state.worker_continuation()
+            continuation_provenance = (
+                dict(continuation.get("provenance") or {})
+                if isinstance(continuation, dict)
+                else {}
+            )
+            request_provenance = (
+                dict(pending_request.get("provenance") or {})
+                if isinstance(pending_request, dict)
+                else {}
+            )
+
+            def terminal_request_precedes(boundary_started_at: Any) -> bool:
+                if pending_request is None:
+                    return True
+                if (
+                    not isinstance(pending_request, dict)
+                    or worker_command_requires_resume(pending_request)
+                ):
+                    return False
+                created_at = str(pending_request.get("created_at", "")).strip()
+                started_at = str(boundary_started_at or "").strip()
+                return bool(
+                    pending_request.get("status") in {"resolved", "cancelled"}
+                    and created_at
+                    and started_at
+                    and created_at < started_at
+                )
+
+            matching_plan_continuation = bool(
+                isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("hitl_stage") == "plan"
+                and continuation.get("actor") == "resource_finder"
+                and continuation_provenance == expected_provenance
+                and str(continuation.get("prompt_block", "")).strip()
+            )
+            matching_pending_request = bool(
+                isinstance(pending_request, dict)
+                and pending_request.get("pipeline_stage") == "resource_finder"
+                and pending_request.get("kind") in {"phase_finish", "raised_idea"}
+                and request_provenance == expected_provenance
+                and worker_command_requires_resume(pending_request)
+            )
+            matching_post_plan_continuation = bool(
+                isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("hitl_stage") in {"execution", "review"}
+                and continuation.get("actor") == "resource_finder"
+                and continuation_provenance == expected_provenance
+                and str(continuation.get("prompt_block", "")).strip()
+            )
+            matching_post_plan_pending_request = bool(
+                matching_post_plan_continuation
+                and isinstance(pending_request, dict)
+                and pending_request.get("pipeline_stage") == "resource_finder"
+                and pending_request.get("kind") in {"phase_finish", "raised_idea"}
+                and request_provenance == expected_provenance
+                and str(pending_request.get("request_key", "")).strip()
+                and worker_command_requires_resume(pending_request)
+                and (
+                    pending_request.get("status") == "resolved"
+                    or pending_request.get("hitl_stage")
+                    == continuation.get("hitl_stage")
+                )
+            )
+            response = (
+                pending_request.get("response")
+                if isinstance(pending_request, dict)
+                else None
+            )
+            matching_approved_post_plan_request = bool(
+                isinstance(pending_request, dict)
+                and pending_request.get("pipeline_stage") == "resource_finder"
+                and pending_request.get("kind") == "phase_finish"
+                and pending_request.get("hitl_stage") in {"execution", "review"}
+                and pending_request.get("status") == "resolved"
+                and request_provenance == expected_provenance
+                and isinstance(response, dict)
+                and response.get("status") == "approved"
+                and str(pending_request.get("workspace_fingerprint", "")).strip()
+                == HitlWorkspaceWriteGuard.public_fingerprint(
+                    work_dir,
+                    scope=pending_request.get("workspace_fingerprint_scope"),
+                )
+            )
+            stage_planning_approved_plan_handoff = bool(
+                isinstance(pending_request, dict)
+                and pending_request.get("pipeline_stage") == "resource_finder"
+                and pending_request.get("kind") == "phase_finish"
+                and pending_request.get("hitl_stage") == "plan"
+                and pending_request.get("status") == "resolved"
+                and isinstance(response, dict)
+                and response.get("status") == "approved"
+                and not bool(response.get("final"))
+                and isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("hitl_stage") == "execution"
+                and continuation.get("actor") == "resource_finder"
+                and request_provenance == expected_provenance
+                and continuation_provenance == expected_provenance
+                and str(continuation.get("prompt_block", "")).strip()
+            )
+            if stage_planning_phase in {
+                "initial",
+                "opening",
+                "response",
+                "decision",
+            }:
+                stage_planning_is_exact = bool(
+                    terminal_request_precedes(
+                        preparation_action.get("created_at")
+                    )
+                    and str(session.get("workspace_fingerprint", "")).strip()
+                    == HitlWorkspaceWriteGuard.public_fingerprint(
+                        work_dir,
+                        scope=session.get("workspace_fingerprint_scope"),
+                    )
+                )
+            elif stage_planning_phase == "reopen_pending":
+                reopen = runtime_state.bind_stage_planning_discussion(
+                    owner=expected_owner
+                ).reopen_recovery_snapshot()
+                handoff = reopen.get("handoff")
+                stage_planning_is_exact = bool(
+                    isinstance(handoff, dict)
+                    and str(handoff.get("workspace_fingerprint", "")).strip()
+                    == HitlWorkspaceWriteGuard.public_fingerprint(
+                        work_dir,
+                        scope=handoff.get("workspace_fingerprint_scope"),
+                    )
+                )
+            elif stage_planning_phase == "final_writing":
+                if stage_planning_approved_plan_handoff:
+                    stage_planning_is_exact = True
+                elif matching_plan_continuation:
+                    stage_planning_is_exact = bool(
+                        pending_request is None
+                        or matching_pending_request
+                        or terminal_request_precedes(
+                            continuation.get("started_at")
+                        )
+                    )
+                elif matching_post_plan_pending_request:
+                    stage_planning_is_exact = True
+                elif matching_approved_post_plan_request:
+                    stage_planning_is_exact = True
+                elif continuation is None:
+                    stage_planning_is_exact = bool(
+                        terminal_request_precedes(
+                            preparation_action.get("created_at")
+                        )
+                        and str(session.get("workspace_fingerprint", "")).strip()
+                        == HitlWorkspaceWriteGuard.public_fingerprint(
+                            work_dir,
+                            scope=session.get("workspace_fingerprint_scope"),
+                        )
+                    )
+        except (
+            HitlRuntimeStateError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            stage_planning_is_exact = False
+    coordination_present = bool(
+        ranked_round_present or discussion_present or planning_discussion_present
+    )
+    approved_single_proposal_handoff_is_exact = False
+    if (
+        not coordination_present
+        and isinstance(preparation_action, dict)
+        and preparation_action.get("kind") == "prepare_proposal"
+        and preparation_action.get("status") == "resolved"
+        and preparation_action.get(PENDING_PLANNING_POLICY_FIELD) is not None
+        and isinstance(pending_request, dict)
+        and pending_request.get("kind") == "proposal"
+        and pending_request.get("status") == "resolved"
+        and isinstance(pending_request.get("response"), dict)
+        and pending_request["response"].get("status") == "approved"
+    ):
+        proposal_id = str(pending_request.get("proposal_idea_id", "")).strip()
+        try:
+            runtime_state.approved_proposal_handoff_for_planning_snapshot(
+                parent_node_sha=current_best_sha,
+                preparation_attempt_id=str(preparation_action.get("attempt_id", "")).strip(),
+                candidate_attempt_id=attempt_dir.name,
+                admitted_proposal_idea_id=proposal_id,
+            )
+            proposals = [
+                record for record in HitlIdeaLog(work_dir).records()
+                if record.get("idea_id") == proposal_id
+            ]
+            prepared_sha = _resolved_proposal_base(preparation_action)
+            approved_single_proposal_handoff_is_exact = bool(
+                len(proposals) == 1
+                and proposals[0].get("idea_type") == "proposal"
+                and proposals[0].get("parent_node_id") == current_best_sha
+                and proposals[0].get("attempt_id") == attempt_dir.name
+                and str(proposals[0].get("proposal", "")).strip()
+                and prepared_sha
+                and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
+            )
+        except (HitlRuntimeStateError, OSError, RuntimeError, ValueError):
+            pass
     ordinary_worker_recovery_allowed = bool(
-        (
-            not ranked_round_present
-            and not discussion_present
+        (not ranked_round_present or (ranked_round_is_exact and ranked_round_stage == "selected"))
+        and (
+            not discussion_present
+            or (discussion_is_exact and discussion_phase == "final_writing")
         )
-        or (ranked_round_is_exact and ranked_round_stage == "selected")
-        or (discussion_is_exact and discussion_phase == "final_writing")
+        and (
+            not planning_discussion_present
+            or (
+                planning_discussion_is_exact
+                and planning_discussion_phase == "final_writing"
+            )
+        )
+        and (
+            not stage_planning_present
+            or (
+                stage_planning_is_exact
+                and stage_planning_phase == "final_writing"
+            )
+        )
     )
     preparation_metadata_is_exact = (
         isinstance(preparation_action, dict)
@@ -2094,13 +2588,16 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and str(preparation_action.get("parent_node_sha", "")).strip()
         == current_best_sha
         and (
-            ranked_round_is_exact
-            if ranked_round_present
-            else (
-                discussion_is_exact
-                if discussion_present
-                else str(preparation_action.get("attempt_id", "")).strip()
+            (not ranked_round_present or ranked_round_is_exact)
+            and (not discussion_present or discussion_is_exact)
+            and (
+                not planning_discussion_present or planning_discussion_is_exact
+            )
+            and (
+                coordination_present
+                or str(preparation_action.get("attempt_id", "")).strip()
                 == attempt_dir.name
+                or approved_single_proposal_handoff_is_exact
             )
         )
         and isinstance(preparation_action.get("additional_agent_ordinal"), int)
@@ -2123,10 +2620,9 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         preparation_action,
     )
     dynamic_agent_request = (
-        not ranked_round_present
-        and not discussion_present
-        and isinstance(pending_request, dict)
+        isinstance(pending_request, dict)
         and pending_request.get("pipeline_stage") == "resource_finder"
+        and (stage_planning_present or not coordination_present)
     )
     dynamic_agent_matches_attempt = (
         dynamic_agent_request
@@ -2152,8 +2648,6 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and preparation_decision.get("choice") == "call_additional_agent"
         and preparation_decision.get("agent") == "resource_finder"
     )
-    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
-
     preparation_recovery = (
         preparation_action.get("recovery")
         if isinstance(preparation_action, dict)
@@ -2192,9 +2686,42 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and worker_command_requires_resume(pending_request)
         and isinstance(continuation, dict)
         and pending_provenance == continuation_provenance
+        and (not stage_planning_present or stage_planning_is_exact)
     )
     pending_response = (
         pending_request.get("response") if isinstance(pending_request, dict) else None
+    )
+    planning_approved_plan_handoff = bool(
+        planning_discussion_is_exact
+        and planning_discussion_phase == "final_writing"
+        and isinstance(pending_request, dict)
+        and pending_request.get("kind") == "phase_finish"
+        and pending_request.get("pipeline_stage") == "experiment_runner"
+        and pending_request.get("hitl_stage") == "plan"
+        and pending_request.get("status") == "resolved"
+        and isinstance(pending_response, dict)
+        and pending_response.get("status") == "approved"
+        and isinstance(continuation, dict)
+        and continuation.get("pipeline_stage") == "experiment_runner"
+        and continuation.get("hitl_stage") == "execution"
+        and continuation.get("actor") == "comment_handler"
+        and continuation_provenance == pending_provenance
+        and str(continuation_provenance.get("proposal_idea_id", "")).strip()
+        == planning_admitted_proposal_id
+        and str(continuation.get("prompt_block", "")).strip()
+    )
+    planning_worker_recovery_is_exact = bool(
+        not planning_discussion_present
+        or (
+            isinstance(pending_request, dict)
+            and pending_request.get("pipeline_stage") == "experiment_runner"
+            and pending_request.get("kind") in {"phase_finish", "raised_idea"}
+            and isinstance(continuation, dict)
+            and continuation.get("pipeline_stage") == "experiment_runner"
+            and continuation.get("actor") == "comment_handler"
+            and str(continuation_provenance.get("proposal_idea_id", "")).strip()
+            == planning_admitted_proposal_id
+        )
     )
     approved_agent_workspace_is_exact = bool(
         preparation_calls_resource_finder
@@ -2216,9 +2743,78 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             scope=pending_request.get("workspace_fingerprint_scope"),
         )
     )
-    if ranked_round_present or discussion_present:
+    if stage_planning_present:
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact and stage_planning_is_exact
+        )
+    elif planning_discussion_present and planning_discussion_phase in {
+        "final_writing", "reopen_pending"
+    }:
+        # Preparation's rollback descriptor is retired before planning starts.
+        # Recover only through the boundary owned by the current planning phase.
+        planning_transition_is_exact = False
+        if preparation_metadata_is_exact:
+            if planning_discussion_phase == "reopen_pending":
+                planning_transition_is_exact = planning_reopen_workspace_is_exact
+            else:
+                upstream_approval_is_exact = bool(
+                    isinstance(pending_request, dict)
+                    and pending_request.get("kind") == "proposal"
+                    and pending_request.get("pipeline_stage") == "experiment_runner"
+                    and pending_request.get("status") == "resolved"
+                    and pending_request.get("proposal_idea_id")
+                    == planning_admitted_proposal_id
+                    and isinstance(pending_response, dict)
+                    and pending_response.get("status") == "approved"
+                    and str(pending_request.get("candidate_attempt_id", "")).strip()
+                    in {"", attempt_dir.name}
+                    and (
+                        not ranked_round_present
+                        or pending_request.get("manager_selection_decision_idea_id")
+                        == durable_round["selection"].get("decision_idea_id")
+                    )
+                )
+                # A failed held-request recovery must never fall through to a
+                # fresh plan owner, even if the workspace happens to match.
+                if pending_request is None or upstream_approval_is_exact:
+                    if continuation is None:
+                        planning_transition_is_exact = (
+                            HitlWorkspaceWriteGuard.public_fingerprint(
+                                work_dir,
+                                scope=durable_planning.get("workspace_fingerprint_scope"),
+                            )
+                            == durable_planning["workspace_fingerprint"]
+                        )
+                    else:
+                        planning_transition_is_exact = bool(
+                            continuation.get("pipeline_stage") == "experiment_runner"
+                            and continuation.get("hitl_stage") == "plan"
+                            and continuation.get("actor") == "comment_handler"
+                            and continuation_provenance.get("parent_node_id")
+                            == current_best_sha
+                            and continuation_provenance.get("attempt_id") == attempt_dir.name
+                            and continuation_provenance.get("proposal_idea_id")
+                            == planning_admitted_proposal_id
+                        )
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact and planning_transition_is_exact
+        )
+    elif approved_single_proposal_handoff_is_exact:
         preparation_is_exact = bool(
             preparation_metadata_is_exact and preparation_workspace_is_exact
+        )
+    elif coordination_present:
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact
+            and (
+                preparation_workspace_is_exact
+                or (
+                    planning_discussion_is_exact
+                    and planning_discussion_phase
+                    in {"initial", "opening", "response", "decision"}
+                    and planning_read_only_workspace_is_exact
+                )
+            )
         )
     else:
         preparation_is_exact = bool(
@@ -2234,15 +2830,24 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         )
     if (
         ordinary_worker_recovery_allowed
-        and worker_command_requires_resume(pending_request)
+        and (
+            worker_command_requires_resume(pending_request)
+            or planning_approved_plan_handoff
+            or stage_planning_approved_plan_handoff
+        )
         and isinstance(continuation, dict)
+        and planning_worker_recovery_is_exact
         and continuation_provenance == pending_provenance
         and str(continuation_provenance.get("attempt_id", "")).strip() == attempt_dir.name
         and str(continuation_provenance.get("parent_node_id", "")).strip()
         == current_best_sha
-        and (not dynamic_agent_request or resumable_agent_request)
         and (
-            not discussion_present
+            not dynamic_agent_request
+            or resumable_agent_request
+            or stage_planning_approved_plan_handoff
+        )
+        and (
+            not (discussion_present or planning_discussion_present)
             or str(continuation.get("hitl_stage", "")).strip()
             in {"plan", "execution", "review"}
             or preparation_workspace_is_exact
@@ -2462,6 +3067,7 @@ def continue_hitl_autoresearch(
     recovered_attempt: Optional[HitlRecoveryResult] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
     proposal_mode_config: Optional[ProposalModeConfig] = None,
+    planning_mode_config: Optional[PlanningModeConfig] = None,
 ) -> Dict[str, Any]:
     """Continue only from the runtime-selected HITL frontier node."""
     print()
@@ -2477,6 +3083,7 @@ def continue_hitl_autoresearch(
     recovery = recovered_attempt or recover_interrupted_hitl_attempt_if_needed(work_dir)
     selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     selected_proposal_mode = normalize_proposal_mode_config(proposal_mode_config)
+    selected_planning_mode = normalize_planning_mode_config(planning_mode_config)
     pending_worker_request = bool(
         recovery and recovery.recovery_classification == "pending_worker_request"
     )
@@ -2592,6 +3199,7 @@ def continue_hitl_autoresearch(
         else None,
         hitl_mode=selected_hitl_mode,
         proposal_mode_config=selected_proposal_mode,
+        planning_mode_config=selected_planning_mode,
     )
     payload = autoresearch_result_payload(result)
     payload["initial_sha"] = lineage_source_sha
@@ -2632,9 +3240,13 @@ class HitlAutoResearchController:
         pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
         proposal_mode_config: Optional[ProposalModeConfig] = None,
+        planning_mode_config: Optional[PlanningModeConfig] = None,
         additional_agent_runner: Optional[AdditionalAgentHook] = None,
         proposal_assessment_runner: Optional[Callable[..., Dict[str, Any]]] = None,
         proposal_prompt_template_renderer: Optional[ProposalPromptTemplateHook] = None,
+        planning_discussion_prompt_template_renderer: Optional[
+            Callable[..., tuple[str, Dict[str, Any]]]
+        ] = None,
     ):
         self.idea = idea
         self.idea_id = idea_id
@@ -2658,9 +3270,15 @@ class HitlAutoResearchController:
         self.proposal_mode_config = normalize_proposal_mode_config(
             proposal_mode_config
         )
+        self.planning_mode_config = normalize_planning_mode_config(
+            planning_mode_config
+        )
         self.additional_agent_runner = additional_agent_runner
         self.proposal_assessment_runner = proposal_assessment_runner
         self.proposal_prompt_template_renderer = proposal_prompt_template_renderer
+        self.planning_discussion_prompt_template_renderer = (
+            planning_discussion_prompt_template_renderer
+        )
 
     def run(self, iterations: int) -> AutoResearchRunResult:
         """
@@ -2938,12 +3556,35 @@ class HitlAutoResearchController:
                     or dict(existing.get("result") or {}).get("proposal_base_sha")
                     or parent_sha
                 ).strip()
+                try:
+                    planning_policy = (
+                        normalize_pending_planning_policy(
+                            existing.get(PENDING_PLANNING_POLICY_FIELD)
+                        )
+                        if PENDING_PLANNING_POLICY_FIELD in existing
+                        else None
+                    )
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
             else:
                 preparation_attempt_id = attempt_id
                 ordinal = self._next_additional_agent_ordinal(attempt_dir)
                 workspace_fingerprint_scope = runtime_state.workspace_guard_scope()
                 workspace_fingerprint = ""
                 proposal_base_sha = parent_sha
+                planning_policy = None
+                planning_config = getattr(
+                    self,
+                    "planning_mode_config",
+                    PlanningModeConfig(mode="single"),
+                )
+                if planning_config.mode == COLLABORATIVE_PLANNING_MODE:
+                    planning_policy = normalize_pending_planning_policy(
+                        {
+                            "participant_count": planning_config.participant_count,
+                            "discussion_rounds": planning_config.discussion_rounds,
+                        }
+                    )
             preparation_dir = (
                 Path(attempt_dir)
                 if Path(attempt_dir).name == preparation_attempt_id
@@ -3028,13 +3669,36 @@ class HitlAutoResearchController:
                         prepared_sha=proposal_base_sha,
                     )
                     preparation_dir.mkdir(parents=True, exist_ok=True)
+                    if planning_policy is not None and not isinstance(existing, dict):
+                        workspace_fingerprint = (
+                            HitlWorkspaceWriteGuard.public_fingerprint(
+                                self.work_dir,
+                                scope=workspace_fingerprint_scope,
+                            )
+                        )
+                        action = {
+                            "kind": "prepare_proposal",
+                            "parent_node_sha": parent_sha,
+                            "attempt_id": preparation_attempt_id,
+                            "additional_agent_ordinal": ordinal,
+                            "workspace_fingerprint": workspace_fingerprint,
+                            "proposal_base_sha": proposal_base_sha,
+                        }
+                        if workspace_fingerprint_scope is not None:
+                            action["workspace_fingerprint_scope"] = (
+                                workspace_fingerprint_scope
+                            )
+                        action[PENDING_PLANNING_POLICY_FIELD] = planning_policy
+                        existing = runtime_state.begin_next_autoresearch_action(action)
                     preparation_rollback = HitlStageRollback.capture(
                         self.work_dir,
                         "HITL AutoResearch proposal-preparation boundary",
                     )
-                    workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
-                        self.work_dir,
-                        scope=workspace_fingerprint_scope,
+                    workspace_fingerprint = (
+                        HitlWorkspaceWriteGuard.public_fingerprint(
+                            self.work_dir,
+                            scope=workspace_fingerprint_scope,
+                        )
                     )
                     recovery = {
                         **preparation_rollback.descriptor(),
@@ -3059,7 +3723,9 @@ class HitlAutoResearchController:
                                 "recovery": recovery,
                             }
                             if workspace_fingerprint_scope is not None:
-                                action["workspace_fingerprint_scope"] = workspace_fingerprint_scope
+                                action["workspace_fingerprint_scope"] = (
+                                    workspace_fingerprint_scope
+                                )
                             existing = runtime_state.begin_next_autoresearch_action(action)
                     except Exception:
                         preparation_rollback.discard(cleanup_label="abandoned")
@@ -3569,6 +4235,19 @@ class HitlAutoResearchController:
         parent_summary = self._frontier_parent_summary(parent_sha)
         runtime = self._proposal_hitl_runtime()
         request_kind = str(pending.get("kind", "")).strip()
+        pending_response = pending.get("response")
+        resume_approved_plan = bool(
+            request_kind == "phase_finish"
+            and pending.get("pipeline_stage") == "experiment_runner"
+            and pending.get("hitl_stage") == "plan"
+            and pending.get("status") == "resolved"
+            and isinstance(pending_response, dict)
+            and pending_response.get("status") == "approved"
+            and continuation.get("pipeline_stage") == "experiment_runner"
+            and continuation.get("hitl_stage") == "execution"
+            and continuation.get("actor") == "comment_handler"
+            and dict(pending.get("provenance") or {}) == provenance
+        )
 
         # Recovery must reconnect to the original evaluator before relaunching
         # a worker; never reconstruct its authority from public candidate files.
@@ -3650,14 +4329,21 @@ class HitlAutoResearchController:
 
         if not proposal or not proposal_idea_id:
             raise RuntimeError("Recovered HITL attempt has no admitted proposal.")
-        comment_result = self._run_candidate_experiment_hitl(
+        if request_kind == "proposal":
+            self._run_collaborative_planning_if_configured(
+                parent_sha=parent_sha,
+                attempt_dir=recovery.removed_attempt_dir,
+                admitted_proposal_idea_id=proposal_idea_id,
+            )
+        comment_result = self._run_candidate_with_planning_reopens(
             proposal=proposal,
             proposal_idea_id=proposal_idea_id,
             parent_node_id=parent_sha,
             attempt_id=attempt_id,
             attempt_dir=recovery.removed_attempt_dir,
             sealed_scoring={"path": sealed_path},
-            resume_pending=request_kind != "proposal",
+            resume_pending=(request_kind != "proposal" and not resume_approved_plan),
+            resume_approved_plan=resume_approved_plan,
         )
         scored_candidate = comment_result.get("scored_candidate")
         if not isinstance(scored_candidate, dict):
@@ -4057,7 +4743,17 @@ class HitlAutoResearchController:
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
             )
-            if proposal_mode.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
+            recovered_proposal = (
+                self._recover_admitted_proposal_for_planning(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                )
+                if resume_attempt_dir is not None
+                else None
+            )
+            if recovered_proposal is not None:
+                proposal, proposal_idea_id = recovered_proposal
+            elif proposal_mode.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
                 proposal, proposal_idea_id = self._run_ranked_proposal_admission_loop(
                     parent_sha=parent_sha,
                     attempt_dir=attempt_dir,
@@ -4077,7 +4773,12 @@ class HitlAutoResearchController:
                     attempt_dir=attempt_dir,
                     attempt_history=attempt_history,
                 )
-            comment_result = self._run_candidate_experiment_hitl(
+            self._run_collaborative_planning_if_configured(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                admitted_proposal_idea_id=proposal_idea_id,
+            )
+            comment_result = self._run_candidate_with_planning_reopens(
                 proposal=proposal,
                 proposal_idea_id=proposal_idea_id,
                 parent_node_id=parent_sha,
@@ -4587,6 +5288,201 @@ class HitlAutoResearchController:
             max_response_rounds=int(config.discussion_rounds),
         )
 
+    def _run_collaborative_planning_if_configured(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        admitted_proposal_idea_id: str,
+    ) -> None:
+        """Enter the durable planning session after one proposal admission."""
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        if not isinstance(action, dict) or (
+            action.get("planning_discussion") is None
+            and action.get(PENDING_PLANNING_POLICY_FIELD) is None
+        ):
+            return
+        self._run_collaborative_planning_discussion(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
+        )
+
+    def _recover_admitted_proposal_for_planning(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[Tuple[str, str]]:
+        """Resume the durable proposal-to-planning handoff after interruption."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict) or (
+            action.get("planning_discussion") is None
+            and action.get(PENDING_PLANNING_POLICY_FIELD) is None
+        ):
+            return None
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        if (
+            action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or not preparation_attempt_id
+        ):
+            raise RuntimeError(
+                "Collaborative planning recovery does not match its proposal preparation."
+            )
+
+        session = None
+        if action.get("planning_discussion") is not None:
+            session = state.planning_discussion_snapshot(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+            )
+            proposal_id = str(session.get("admitted_proposal_idea_id", "")).strip()
+        else:
+            command = state.pending_worker_command()
+            response = command.get("response") if isinstance(command, dict) else None
+            if (
+                not isinstance(command, dict)
+                or command.get("kind") != "proposal"
+                or command.get("pipeline_stage") != "experiment_runner"
+                or command.get("status") != "resolved"
+                or not isinstance(response, dict)
+                or response.get("status") != "approved"
+            ):
+                return None
+            proposal_id = str(command.get("proposal_idea_id", "")).strip()
+
+        proposal_records = [
+            record
+            for record in self._proposal_hitl_runtime().log.records()
+            if record.get("idea_id") == proposal_id
+        ]
+        if len(proposal_records) != 1:
+            raise RuntimeError(
+                "Collaborative planning recovery requires one admitted proposal record."
+            )
+        proposal_record = proposal_records[0]
+        proposal = str(proposal_record.get("proposal", "")).strip()
+        if (
+            proposal_record.get("idea_type") != "proposal"
+            or proposal_record.get("parent_node_id") != parent_sha
+            or proposal_record.get("attempt_id") != attempt_dir.name
+            or not proposal
+        ):
+            raise RuntimeError(
+                "Collaborative planning recovery found a stale admitted proposal record."
+            )
+
+        if session is None:
+            scope = action.get("workspace_fingerprint_scope")
+            expected_fingerprint = str(action.get("workspace_fingerprint", "")).strip()
+            observed_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=scope,
+            )
+            if not expected_fingerprint or observed_fingerprint != expected_fingerprint:
+                raise RuntimeError(
+                    "Collaborative planning recovery no longer matches its approved workspace."
+                )
+            state.settle_approved_proposal_handoff_for_planning(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+                admitted_proposal_idea_id=proposal_id,
+            )
+        return proposal, proposal_id
+
+    def _begin_or_resume_planning_discussion(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        admitted_proposal_idea_id: str,
+    ) -> Dict[str, Any]:
+        """Commit the post-admission planning boundary, or resume that session."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+        ):
+            raise RuntimeError(
+                "Collaborative planning requires its resolved proposal preparation."
+            )
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        existing = action.get("planning_discussion")
+        if existing is not None:
+            return state.planning_discussion_snapshot(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+            )
+
+        owner = self._proposal_hitl_runtime()
+        owner.require_scoped_task_session_boundary()
+        proposal_id = str(admitted_proposal_idea_id).strip()
+        proposal_record = next(
+            (
+                record
+                for record in owner.log.records()
+                if record.get("idea_id") == proposal_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(proposal_record, dict)
+            or proposal_record.get("idea_type") != "proposal"
+            or proposal_record.get("parent_node_id") != parent_sha
+            or proposal_record.get("attempt_id") != attempt_dir.name
+        ):
+            raise RuntimeError(
+                "Collaborative planning requires the admitted proposal record for this attempt."
+            )
+
+        scope = action.get("workspace_fingerprint_scope")
+        workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=scope,
+        )
+        git_state = HitlGitStateStore(self.work_dir)
+        whiteboard_boundary_sha = git_state.hitl_autoresearch_whiteboard_history_sha()
+        if not git_state.hitl_autoresearch_whiteboard_matches_commit(
+            whiteboard_boundary_sha
+        ):
+            raise RuntimeError(
+                "Collaborative planning does not match its current whiteboard boundary."
+            )
+        idea_numbers = [
+            int(idea_id[1:])
+            for record in owner.log.records()
+            if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+            and idea_id[1:].isdigit()
+        ]
+        return state.begin_planning_discussion(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            admitted_proposal_idea_id=proposal_id,
+            workspace_fingerprint=workspace_fingerprint,
+            workspace_fingerprint_scope=scope,
+            whiteboard_boundary_sha=whiteboard_boundary_sha,
+            base_idea_number=max(idea_numbers, default=0),
+        )
+
     def _capture_proposal_discussion_boundary(
         self,
         *,
@@ -4664,6 +5560,88 @@ class HitlAutoResearchController:
         if not bool(initial.get("valid")):
             raise RuntimeError(
                 "Collaborative proposal discussion boundary is invalid: "
+                + "; ".join(str(item) for item in initial.get("issues", []))
+            )
+        return require_unchanged
+
+    def _capture_planning_discussion_boundary(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        session: Dict[str, Any],
+    ) -> Callable[[], Dict[str, Any]]:
+        """Capture the session-owned read-only planning boundary."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or not str(action.get("attempt_id", "")).strip()
+        ):
+            raise RuntimeError(
+                "Collaborative planning requires its resolved proposal preparation."
+            )
+        durable = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=str(action["attempt_id"]),
+            candidate_attempt_id=attempt_dir.name,
+        )
+        if durable != session:
+            raise RuntimeError(
+                "Collaborative planning discussion state changed unexpectedly."
+            )
+        scope = session.get("workspace_fingerprint_scope")
+        expected_fingerprint = str(session.get("workspace_fingerprint", "")).strip()
+        current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=scope,
+        )
+        if not expected_fingerprint or current_fingerprint != expected_fingerprint:
+            raise RuntimeError(
+                "Planning workspace no longer matches its admitted proposal boundary."
+            )
+        public_guard = HitlWorkspaceWriteGuard.capture_public(
+            self.work_dir,
+            scope=scope,
+        )
+        whiteboard_sha = str(session.get("whiteboard_boundary_sha", "")).strip()
+
+        def require_unchanged() -> Dict[str, Any]:
+            issues: list[str] = []
+            public_validation = public_guard.require_unchanged()
+            if not bool(public_validation.get("valid")):
+                raw = public_validation.get("issues", [])
+                issues.extend(
+                    str(item)
+                    for item in (raw if isinstance(raw, list) else [raw])
+                    if str(item).strip()
+                )
+            git_state = HitlGitStateStore(self.work_dir)
+            if not git_state.hitl_autoresearch_whiteboard_history_contains(
+                whiteboard_sha
+            ):
+                issues.append(
+                    "The planning whiteboard boundary is no longer in canonical history."
+                )
+            elif not git_state.hitl_autoresearch_whiteboard_matches_commit(
+                whiteboard_sha
+            ):
+                issues.append(
+                    "The live whiteboard no longer matches the planning boundary."
+                )
+            return {"valid": not issues, "issues": issues}
+
+        initial = require_unchanged()
+        if not bool(initial.get("valid")):
+            raise RuntimeError(
+                "Collaborative planning boundary is invalid: "
                 + "; ".join(str(item) for item in initial.get("issues", []))
             )
         return require_unchanged
@@ -5191,6 +6169,763 @@ class HitlAutoResearchController:
         if not finish.get("complete") or not str(finish.get("record_id", "")).strip():
             raise RuntimeError("Proposal discussion task ended without a recorded result.")
         return finish
+
+    def _prepare_planning_discussion_task_runtime(
+        self,
+        *,
+        task_id: str,
+        session: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        seed_idea_ids: Sequence[str] = (),
+        cancel_event: Optional[threading.Event] = None,
+    ) -> HitlRuntime:
+        """Bind one planning participant to the admitted proposal and session."""
+
+        from core.hitl_discussion import parse_discussion_task_id
+
+        identity = parse_discussion_task_id(task_id)
+        profile = (
+            "planning_discussion_decision"
+            if identity.phase == "decision"
+            else "planning_discussion_turn"
+        )
+        task = session.get("tasks", {}).get(task_id)
+        if not isinstance(task, dict):
+            raise RuntimeError("Planning discussion task set is invalid.")
+        task_runtime = self._new_discussion_task_runtime(task_id)
+        try:
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage="plan",
+                command_profile=profile,
+                actor="comment_handler",
+                proposal_preparation_attempt_id=preparation_attempt_id,
+                planning_discussion_attempt_dir=attempt_dir,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_dir.name,
+                    "proposal_idea_id": session["admitted_proposal_idea_id"],
+                    "discussion_turn_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": session["base_idea_number"],
+                    "whiteboard_boundary_sha": session["whiteboard_boundary_sha"],
+                    "seed_idea_ids": list(seed_idea_ids),
+                },
+                phase_finish_validator=boundary_validator,
+                scoped_task_cancel_event=cancel_event,
+            )
+        except BaseException:
+            task_runtime.clear_idea_tool_context()
+            raise
+        return task_runtime
+
+    def _run_planning_discussion_task(
+        self,
+        *,
+        task_id: str,
+        session: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        seed_idea_ids: Sequence[str] = (),
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
+        """Run one planning task through the established finite replacement loop."""
+
+        if self.proposal_assessment_runner is None:
+            raise RuntimeError("Planning discussion requires its configured agent runner.")
+        from agents.planning_discussion import (
+            planning_discussion_task_prompt_suffix,
+            planning_final_owner_prompt_template,
+        )
+        from core.agent_cli import append_prompt_block
+        from core.hitl_discussion import parse_discussion_task_id
+        from core.hitl_planning_discussion import planning_discussion_task_id
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        task_identity = parse_discussion_task_id(task_id)
+        proposal_id = str(session.get("admitted_proposal_idea_id", "")).strip()
+        proposal_record = next(
+            (
+                record
+                for record in self._proposal_hitl_runtime().log.records()
+                if record.get("idea_id") == proposal_id
+                and record.get("idea_type") == "proposal"
+            ),
+            None,
+        )
+        if not isinstance(proposal_record, dict):
+            raise RuntimeError(
+                "Planning discussion lost its admitted proposal record."
+            )
+        candidate_prompt_context = {
+            "assigned_candidate_sha": parent_sha,
+            "autoresearch_attempt": bool(
+                parent_sha and attempt_dir.name and proposal_id
+            ),
+        }
+        task_runtime = self._prepare_planning_discussion_task_runtime(
+            task_id=task_id,
+            session=session,
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            attempt_dir=attempt_dir,
+            boundary_validator=boundary_validator,
+            seed_idea_ids=seed_idea_ids,
+            cancel_event=cancel_event,
+        )
+        try:
+            task_prompt = planning_discussion_task_prompt_suffix(task_id)
+            next_prompt_template = ""
+            final_prompt_template = ""
+            if task_identity.phase != "initial":
+                renderer = self.planning_discussion_prompt_template_renderer
+                if not callable(renderer):
+                    raise RuntimeError(
+                        "Collaborative planning requires its prompt-template renderer."
+                    )
+                participant_count = int(session["participant_count"])
+                round_ordinal = int(session["round_ordinal"])
+                next_task_id = ""
+                if task_identity.phase == "opening":
+                    next_task_id = planning_discussion_task_id(
+                        "response", participant_ordinal=2, round_ordinal=1
+                    )
+                elif task_identity.phase == "response":
+                    if task_identity.participant_ordinal < participant_count:
+                        next_task_id = planning_discussion_task_id(
+                            "response",
+                            participant_ordinal=task_identity.participant_ordinal + 1,
+                            round_ordinal=round_ordinal,
+                        )
+                    elif round_ordinal < int(session["max_response_rounds"]):
+                        next_task_id = planning_discussion_task_id(
+                            "decision",
+                            participant_ordinal=1,
+                            round_ordinal=round_ordinal,
+                        )
+                elif task_identity.phase == "decision":
+                    next_task_id = planning_discussion_task_id(
+                        "response",
+                        participant_ordinal=2,
+                        round_ordinal=round_ordinal + 1,
+                    )
+                if next_task_id:
+                    next_template, _background = renderer(
+                        approved_proposal=str(proposal_record["proposal"]),
+                        discussion_task_id=next_task_id,
+                        **candidate_prompt_context,
+                    )
+                    next_prompt_template = append_prompt_block(
+                        next_template,
+                        planning_discussion_task_prompt_suffix(next_task_id),
+                    )
+                revision_feedback = self._planning_discussion_revision_feedback(
+                    session=session,
+                    attempt_dir=attempt_dir,
+                )
+                owner_prompt = (
+                    task_runtime.compose_worker_prompt(
+                        hitl_stage="plan",
+                        phase_prompt=task_runtime.plan_revision_prompt_block(
+                            revision_feedback
+                        ),
+                    )
+                    if revision_feedback
+                    else task_runtime.plan_prompt_block(
+                        approved_proposal=str(proposal_record["proposal"]),
+                        requires_human_approval=True,
+                    )
+                )
+                final_prompt_template = planning_final_owner_prompt_template(
+                    owner_prompt
+                )
+        except BaseException:
+            task_runtime.clear_idea_tool_context()
+            raise
+
+        def require_boundary() -> None:
+            validation = boundary_validator()
+            if bool(validation.get("valid")):
+                return
+            raw = validation.get("issues", [])
+            issues = raw if isinstance(raw, list) else [raw]
+            detail = "; ".join(str(item) for item in issues if str(item).strip())
+            raise RuntimeError(
+                "Planning discussion task crossed its read-only boundary"
+                + (f": {detail}" if detail else ".")
+            )
+
+        try:
+            require_boundary()
+            reconciled = task_runtime.reconcile_proposal_discussion_task()
+            if reconciled.get("complete") or reconciled.get("cancelled"):
+                return reconciled
+
+            def launch_worker(
+                prompt: str,
+                _log_prefix: str,
+                *,
+                record_continuation: bool,
+            ) -> Dict[str, Any]:
+                if record_continuation:
+                    raise RuntimeError(
+                        "Planning discussion tasks must not record global worker "
+                        "continuation."
+                    )
+                raise_if_hitl_run_stop_requested()
+                require_boundary()
+                if cancel_event is not None and cancel_event.is_set():
+                    return {
+                        "success": False,
+                        "return_code": None,
+                        "timed_out": False,
+                        "stopped": False,
+                        "cancelled": True,
+                        "background_processes_terminated": False,
+                        "provider_process_failed": False,
+                    }
+                return self.proposal_assessment_runner(
+                    role="planning_discussion",
+                    idea=self.idea,
+                    approved_proposal=str(proposal_record["proposal"]),
+                    discussion_task_id=task_id,
+                    discussion_records=(),
+                    prompt_builder=lambda template, background: (
+                        task_runtime.prepare_planning_discussion_prompt(
+                            prompt_template=template,
+                            public_background=background,
+                            next_prompt_template=next_prompt_template,
+                            final_prompt_template=final_prompt_template,
+                        )
+                    ),
+                    task_dir=attempt_dir / "planning_discussion" / "tasks" / task_id,
+                    prompt_suffix=prompt,
+                    env_extra=task_runtime.idea_tool_env(),
+                    cancel_event=cancel_event,
+                    output_prefix=task_id,
+                    **candidate_prompt_context,
+                )
+
+            _result, finish = run_worker_with_replacements(
+                runtime=task_runtime,
+                launch_worker=launch_worker,
+                prompt=task_prompt,
+                log_prefix=task_id.replace("/", "_"),
+                phase="plan",
+                worker_name=task_identity.display_label,
+                record_continuation=False,
+                result_after_exit=lambda result: (
+                    task_runtime.proposal_discussion_task_result_after_worker_exit(
+                        result,
+                        replacement_prompt=task_prompt,
+                        worker_name=task_identity.display_label,
+                    )
+                ),
+            )
+            require_boundary()
+        finally:
+            task_runtime.clear_idea_tool_context()
+        if finish.get("cancelled"):
+            return finish
+        if not finish.get("complete") or not str(finish.get("record_id", "")).strip():
+            raise RuntimeError("Planning discussion task ended without a recorded result.")
+        return finish
+
+    def _require_initial_planning_discussion_capacity(
+        self,
+        *,
+        parent_sha: str,
+        session: Dict[str, Any],
+        attempt_dir: Path,
+        approved_proposal: str,
+    ) -> None:
+        """Reserve the complete mandatory first segment before any participant runs."""
+
+        from agents.planning_discussion import (
+            planning_discussion_task_prompt_suffix,
+            planning_final_owner_prompt_template,
+        )
+        from core.agent_cli import append_prompt_block
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_discussion_task_id,
+            require_initial_planning_discussion_capacity,
+        )
+
+        renderer = self.planning_discussion_prompt_template_renderer
+        if not callable(renderer):
+            raise RuntimeError(
+                "Collaborative planning requires its prompt-template renderer."
+            )
+        participant_count = int(session["participant_count"])
+        candidate_prompt_context = {
+            "assigned_candidate_sha": parent_sha,
+            "autoresearch_attempt": bool(
+                parent_sha
+                and attempt_dir.name
+                and str(session.get("admitted_proposal_idea_id", "")).strip()
+            ),
+        }
+
+        def render(task_id: str) -> tuple[str, Dict[str, Any]]:
+            template, background = renderer(
+                approved_proposal=approved_proposal,
+                discussion_task_id=task_id,
+                **candidate_prompt_context,
+            )
+            return (
+                append_prompt_block(
+                    template,
+                    planning_discussion_task_prompt_suffix(task_id),
+                ),
+                background,
+            )
+
+        initial_id = planning_discussion_task_id(
+            "initial", participant_ordinal=participant_count
+        )
+        opening_id = planning_discussion_task_id("opening", participant_ordinal=1)
+        response_id = planning_discussion_task_id(
+            "response",
+            participant_ordinal=participant_count,
+            round_ordinal=1,
+        )
+        initial_template, background = render(initial_id)
+        opening_template, _ = render(opening_id)
+        response_template, _ = render(response_id)
+        owner_prompt = planning_final_owner_prompt_template(
+            self._proposal_hitl_runtime().plan_prompt_block(
+                approved_proposal=approved_proposal,
+                requires_human_approval=True,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_dir.name,
+                    "proposal_idea_id": session["admitted_proposal_idea_id"],
+                },
+            )
+        )
+        store = PlanningDiscussionRecordStore(attempt_dir)
+        runtime = self._proposal_hitl_runtime()
+        try:
+            require_initial_planning_discussion_capacity(
+                runtime=runtime,
+                session=session,
+                record_store=store,
+                initial_prompt_template=initial_template,
+                opening_prompt_template=opening_template,
+                response_prompt_template=response_template,
+                final_owner_prompt_template=owner_prompt,
+                public_background=background,
+            )
+        except ValueError as exc:
+            raise HitlTerminalRuntimeError(
+                "Collaborative planning cannot fit its mandatory first segment in "
+                "the verified worker context."
+            ) from exc
+
+    def _run_collaborative_planning_initial_phase(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        admitted_proposal_idea_id: str,
+    ) -> Dict[str, Any]:
+        """Run unfinished private inputs, then reveal them in scheduler order."""
+
+        session = self._begin_or_resume_planning_discussion(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
+        )
+        if session.get("phase") in {
+            "opening",
+            "response",
+            "decision",
+            "final_writing",
+        }:
+            return session
+        if session.get("phase") != "initial":
+            raise RuntimeError(
+                "Collaborative planning initial coordinator found an invalid phase."
+            )
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        preparation_attempt_id = str((action or {}).get("attempt_id", "")).strip()
+        if not preparation_attempt_id:
+            raise RuntimeError(
+                "Collaborative planning lost its proposal preparation identity."
+            )
+        boundary_validator = self._capture_planning_discussion_boundary(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            session=session,
+        )
+        coordinator = self._planning_discussion_coordinator(
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            attempt_dir=attempt_dir,
+            boundary_validator=boundary_validator,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
+        )
+        return coordinator.run_initial(session)
+
+    def _planning_discussion_coordinator(
+        self,
+        *,
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        admitted_proposal_idea_id: str,
+    ):
+        """Bind the shared planning protocol to candidate-planning services."""
+
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_discussion_reopen_source_idea_ids,
+            prepare_collaborative_planning_meeting,
+        )
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        state = HitlRuntimeState(self.work_dir)
+        state_binding = state.bind_candidate_planning_discussion(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+        )
+
+        def run_task(
+            task_id: str,
+            current: Dict[str, Any],
+            seed_idea_ids: Sequence[str],
+            cancel_event: Optional[threading.Event],
+        ) -> None:
+            task = current["tasks"].get(task_id)
+            if isinstance(task, dict) and task.get("result_record_id") == task_id:
+                return
+            self._run_planning_discussion_task(
+                task_id=task_id,
+                session=current,
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                attempt_dir=attempt_dir,
+                boundary_validator=boundary_validator,
+                seed_idea_ids=seed_idea_ids,
+                cancel_event=cancel_event,
+            )
+
+        def prepare_initial(current: Dict[str, Any]) -> None:
+            self._require_initial_planning_discussion_capacity(
+                parent_sha=parent_sha,
+                session=current,
+                attempt_dir=attempt_dir,
+                approved_proposal=self._proposal_text_for(
+                    admitted_proposal_idea_id
+                ),
+            )
+
+        def check_boundary(label: str) -> None:
+            self._require_proposal_discussion_boundary(boundary_validator, label)
+
+        def reopen_source_idea_ids(current: Dict[str, Any]) -> Sequence[str]:
+            return planning_discussion_reopen_source_idea_ids(
+                current,
+                PlanningDiscussionRecordStore(attempt_dir).records(),
+            )
+
+        return prepare_collaborative_planning_meeting(
+            state_binding=state_binding,
+            run_task=run_task,
+            prepare_initial=prepare_initial,
+            check_boundary=check_boundary,
+            reopen_source_idea_ids=reopen_source_idea_ids,
+            check_stop=raise_if_hitl_run_stop_requested,
+        )
+
+    def _run_collaborative_planning_discussion(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        admitted_proposal_idea_id: str,
+    ) -> Dict[str, Any]:
+        """Run the fixed planning protocol to its final-owner boundary."""
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        existing = (
+            action.get("planning_discussion")
+            if isinstance(action, dict)
+            else None
+        )
+        if isinstance(existing, dict) and existing.get("phase") == "reopen_pending":
+            self._recover_collaborative_planning_reopen(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+            )
+
+        session = self._run_collaborative_planning_initial_phase(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
+        )
+        if session.get("phase") == "final_writing":
+            return session
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        preparation_attempt_id = str((action or {}).get("attempt_id", "")).strip()
+        if not preparation_attempt_id:
+            raise RuntimeError(
+                "Collaborative planning lost its proposal preparation identity."
+            )
+        boundary_validator = self._capture_planning_discussion_boundary(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            session=session,
+        )
+        coordinator = self._planning_discussion_coordinator(
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            attempt_dir=attempt_dir,
+            boundary_validator=boundary_validator,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
+        )
+        return coordinator.run(session)
+
+    def _recover_collaborative_planning_reopen(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> None:
+        """Reconcile and apply an accepted plan-owner handoff after interruption."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError(
+                "Collaborative planning reopening lost proposal preparation state."
+            )
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        session = state.planning_discussion_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+        )
+        if session.get("phase") != "reopen_pending":
+            return
+        runtime = self._proposal_hitl_runtime()
+        runtime.prepare_idea_tool_context(
+            hitl_stage="plan",
+            actor="comment_handler",
+            provenance={
+                "parent_node_id": parent_sha,
+                "attempt_id": attempt_dir.name,
+                "proposal_idea_id": session["admitted_proposal_idea_id"],
+            },
+            requires_human_approval=True,
+            proposal_preparation_attempt_id=preparation_attempt_id,
+            planning_discussion_attempt_dir=attempt_dir,
+            planning_discussion_final_owner=True,
+        )
+        try:
+            reconciled = runtime.reconcile_planning_discussion_reopen()
+            transfer = runtime.prepare_planning_discussion_reopen_transfer(
+                reconciled["reopen_record_id"]
+            )
+        finally:
+            runtime.clear_idea_tool_context()
+        state.apply_planning_discussion_reopen(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            reopen_record_id=transfer["reopen_record_id"],
+            whiteboard_boundary_sha=transfer["whiteboard_boundary_sha"],
+        )
+
+    def _collaborative_planning_final_session(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Return the terminal planning session for this physical attempt, if any."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+            return None
+        discussion = action.get("planning_discussion")
+        if discussion is None:
+            return None
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        if (
+            action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or not preparation_attempt_id
+        ):
+            raise RuntimeError(
+                "Collaborative plan writing does not match its proposal preparation."
+            )
+        session = state.planning_discussion_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=Path(attempt_dir).name,
+        )
+        if session.get("phase") != "final_writing":
+            raise RuntimeError(
+                "Ordinary plan writing cannot start before collaborative planning finishes."
+            )
+        return action, session
+
+    def _collaborative_planning_owner_prompt_builder(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[Callable[..., str]]:
+        """Compose canonical planning records with the ordinary plan prompt."""
+
+        final = self._collaborative_planning_final_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if final is None:
+            return None
+        action, _session = final
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": str(action["attempt_id"]),
+            "candidate_attempt_id": Path(attempt_dir).name,
+        }
+        from agents.autoresearch_proposer import collect_public_proposal_context
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_final_owner_prompt_composer,
+        )
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        runtime = self._proposal_hitl_runtime()
+        return planning_final_owner_prompt_composer(
+            runtime=runtime,
+            state_binding=HitlRuntimeState(
+                self.work_dir
+            ).bind_candidate_planning_discussion(**identity),
+            record_store=PlanningDiscussionRecordStore(attempt_dir),
+            public_background=lambda: collect_public_proposal_context(
+                self.work_dir,
+                include_attempt_history=False,
+                hitl_autoresearch_whiteboard=True,
+            ),
+            check_stop=raise_if_hitl_run_stop_requested,
+        )
+
+    def _collaborative_planning_reopen_capacity_validator(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[Callable[[Dict[str, Any]], None]]:
+        """Build the exact pre-mutation capacity check for one planning reopen."""
+
+        final = self._collaborative_planning_final_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if final is None:
+            return None
+        action, _session = final
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": str(action["attempt_id"]),
+            "candidate_attempt_id": Path(attempt_dir).name,
+        }
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_discussion_reopen_capacity_validator,
+        )
+
+        binding = HitlRuntimeState(self.work_dir).bind_candidate_planning_discussion(
+            **identity
+        )
+        owner = self._proposal_hitl_runtime()
+
+        def render_participant_prompt(
+            task_id: str,
+        ) -> tuple[str, Dict[str, Any]]:
+            renderer = self.planning_discussion_prompt_template_renderer
+            if not callable(renderer):
+                raise ValueError("Planning reopen has no prompt renderer.")
+            current = binding.snapshot()
+            return renderer(
+                approved_proposal=self._proposal_text_for(
+                    str(current["admitted_proposal_idea_id"])
+                ),
+                discussion_task_id=task_id,
+                assigned_candidate_sha=parent_sha,
+                autoresearch_attempt=bool(
+                    parent_sha
+                    and attempt_dir.name
+                    and str(current["admitted_proposal_idea_id"]).strip()
+                ),
+            )
+
+        return planning_discussion_reopen_capacity_validator(
+            runtime=owner,
+            state_binding=binding,
+            record_store=PlanningDiscussionRecordStore(attempt_dir),
+            render_participant_prompt=render_participant_prompt,
+            render_owner_revision_prompt=lambda feedback: owner.compose_worker_prompt(
+                hitl_stage="plan",
+                phase_prompt=owner.plan_revision_prompt_block(feedback),
+            ),
+        )
+
+    def _planning_discussion_revision_feedback(
+        self,
+        *,
+        session: Dict[str, Any],
+        attempt_dir: Path,
+    ) -> str:
+        """Return the feedback attached to the latest applied planning reopen."""
+
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_discussion_revision_feedback,
+        )
+
+        return planning_discussion_revision_feedback(
+            session=session,
+            record_store=PlanningDiscussionRecordStore(attempt_dir),
+            idea_records=self._proposal_hitl_runtime().log.records(),
+        )
+
+    def _collaborative_planning_revision_feedback(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> str:
+        """Return feedback for the latest applied planning reopen, if any."""
+
+        final = self._collaborative_planning_final_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if final is None:
+            return ""
+        _action, session = final
+        return self._planning_discussion_revision_feedback(
+            session=session,
+            attempt_dir=attempt_dir,
+        )
 
     def _prepare_ranked_task_runtime(
         self,
@@ -5922,6 +7657,57 @@ class HitlAutoResearchController:
                 non_admitted_proposal_idea_id=proposal_idea_id,
             )
 
+    def _run_candidate_with_planning_reopens(
+        self,
+        *,
+        proposal: str,
+        proposal_idea_id: str,
+        parent_node_id: str,
+        attempt_id: str,
+        attempt_dir: Path,
+        sealed_scoring: Dict[str, Optional[Path]],
+        resume_pending: bool = False,
+        resume_approved_plan: bool = False,
+    ) -> Dict[str, Any]:
+        """Run the candidate worker through any accepted planning reopenings."""
+
+        while True:
+            result = self._run_candidate_experiment_hitl(
+                proposal=proposal,
+                proposal_idea_id=proposal_idea_id,
+                parent_node_id=parent_node_id,
+                attempt_id=attempt_id,
+                attempt_dir=attempt_dir,
+                sealed_scoring=sealed_scoring,
+                resume_pending=resume_pending,
+                resume_approved_plan=resume_approved_plan,
+            )
+            if not result.get("reopen_discussion"):
+                return result
+            action = HitlRuntimeState(self.work_dir).snapshot().get(
+                "next_autoresearch_action"
+            )
+            if not isinstance(action, dict):
+                raise RuntimeError(
+                    "Collaborative planning reopening lost proposal preparation state."
+                )
+            HitlRuntimeState(self.work_dir).apply_planning_discussion_reopen(
+                parent_node_sha=parent_node_id,
+                preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+                candidate_attempt_id=attempt_dir.name,
+                reopen_record_id=str(result.get("reopen_record_id", "")).strip(),
+                whiteboard_boundary_sha=str(
+                    result.get("whiteboard_boundary_sha", "")
+                ).strip(),
+            )
+            self._run_collaborative_planning_discussion(
+                parent_sha=parent_node_id,
+                attempt_dir=attempt_dir,
+                admitted_proposal_idea_id=proposal_idea_id,
+            )
+            resume_pending = False
+            resume_approved_plan = False
+
     def _run_candidate_experiment_hitl(
         self,
         *,
@@ -5932,6 +7718,7 @@ class HitlAutoResearchController:
         attempt_dir: Path,
         sealed_scoring: Dict[str, Optional[Path]],
         resume_pending: bool = False,
+        resume_approved_plan: bool = False,
     ) -> Dict[str, Any]:
         if self.hitl_comment_mode is None:
             raise RuntimeError("HITL AutoResearch requires a HITL comment-handler runner.")
@@ -6174,11 +7961,67 @@ class HitlAutoResearchController:
                 logs_dir=attempt_dir,
             )
 
-        continuation = runtime.worker_continuation() if resume_pending else None
+        continuation = (
+            runtime.worker_continuation()
+            if resume_pending or resume_approved_plan
+            else None
+        )
         resumed_stage = str((continuation or {}).get("hitl_stage", "")).strip()
-        if resume_pending and resumed_stage not in {"plan", "execution", "review"}:
+        if (resume_pending or resume_approved_plan) and resumed_stage not in {
+            "plan",
+            "execution",
+            "review",
+        }:
             raise RuntimeError("Recovered HITL experiment has no valid worker stage.")
-        initial_stage = resumed_stage if resume_pending else "plan"
+        if resume_approved_plan and resumed_stage != "execution":
+            raise RuntimeError(
+                "Recovered approved plan does not own an execution continuation."
+            )
+        initial_stage = (
+            resumed_stage if resume_pending or resume_approved_plan else "plan"
+        )
+        planning_final = (
+            self._collaborative_planning_final_session(
+                parent_sha=parent_node_id,
+                attempt_dir=attempt_dir,
+            )
+            if initial_stage == "plan"
+            else None
+        )
+        planning_owner_context: Dict[str, Any] = {}
+        planning_prompt_builder: Optional[Callable[..., str]] = None
+        if planning_final is not None:
+            planning_action, planning_session = planning_final
+            if (
+                str(planning_session.get("admitted_proposal_idea_id", "")).strip()
+                != proposal_idea_id
+            ):
+                raise RuntimeError(
+                    "Collaborative planning final writing does not match the admitted proposal."
+                )
+            planning_prompt_builder = self._collaborative_planning_owner_prompt_builder(
+                parent_sha=parent_node_id,
+                attempt_dir=attempt_dir,
+            )
+            reopen_capacity_validator = (
+                self._collaborative_planning_reopen_capacity_validator(
+                    parent_sha=parent_node_id,
+                    attempt_dir=attempt_dir,
+                )
+            )
+            if planning_prompt_builder is None or reopen_capacity_validator is None:
+                raise RuntimeError(
+                    "Collaborative planning final owner has no bounded context adapters."
+                )
+            planning_owner_context = {
+                "proposal_preparation_attempt_id": str(planning_action["attempt_id"]),
+                "planning_discussion_attempt_dir": attempt_dir,
+                "planning_discussion_final_owner": True,
+                "planning_discussion_prompt_composer": planning_prompt_builder,
+                "planning_discussion_reopen_capacity_validator": (
+                    reopen_capacity_validator
+                ),
+            }
         runtime.prepare_idea_tool_context(
             hitl_stage=initial_stage,
             actor="comment_handler",
@@ -6188,16 +8031,48 @@ class HitlAutoResearchController:
             phase_finish_validator=lambda: validate_required_artifact_contract(self.work_dir),
             scoring_handler=score_in_background,
             scoring_repair_cleanup=clear_repairable_scoring_handoff,
+            **planning_owner_context,
         )
+        planning_reopen_transfer: Optional[Dict[str, str]] = None
         try:
-            prompt = (
-                _load_hitl_template("worker_resume_pending_request.txt")
-                if resume_pending
-                else runtime.plan_prompt_block(
-                    approved_proposal=proposal,
-                    requires_human_approval=True,
+            if resume_pending:
+                prompt = _load_hitl_template("worker_resume_pending_request.txt")
+            elif resume_approved_plan:
+                prompt = str((continuation or {}).get("prompt_block", "")).strip()
+                if not prompt:
+                    raise RuntimeError(
+                        "Recovered approved plan has no saved execution prompt."
+                    )
+            else:
+                revision_feedback = (
+                    self._collaborative_planning_revision_feedback(
+                        parent_sha=parent_node_id,
+                        attempt_dir=attempt_dir,
+                    )
+                    if planning_prompt_builder is not None
+                    else ""
                 )
-            )
+                prompt = (
+                    runtime.compose_worker_prompt(
+                        hitl_stage="plan",
+                        phase_prompt=runtime.plan_revision_prompt_block(
+                            revision_feedback
+                        ),
+                    )
+                    if revision_feedback
+                    else runtime.plan_prompt_block(
+                        approved_proposal=proposal,
+                        requires_human_approval=True,
+                    )
+                )
+                if planning_prompt_builder is not None:
+                    try:
+                        prompt = planning_prompt_builder(prompt)
+                    except ValueError as exc:
+                        raise HitlTerminalRuntimeError(
+                            "Formal collaborative plan writing exceeds the verified "
+                            "worker context budget."
+                        ) from exc
             initial_context = (
                 "Reconnect to the runtime-held HITL request before doing any new work."
                 if resume_pending
@@ -6233,14 +8108,27 @@ class HitlAutoResearchController:
                 prompt=prompt,
                 log_prefix=(
                     "autoresearch_hitl_experiment_resume"
-                    if resume_pending
+                    if resume_pending or resume_approved_plan
                     else "autoresearch_hitl_experiment_plan"
                 ),
                 phase="stage",
                 worker_name="AutoResearch candidate experiment",
+                record_continuation=not resume_approved_plan,
             )
+            if finish.get("reopen_discussion"):
+                planning_reopen_transfer = (
+                    runtime.prepare_planning_discussion_reopen_transfer(
+                        str(finish.get("reopen_record_id", ""))
+                    )
+                )
         finally:
             runtime.clear_idea_tool_context()
+        if planning_reopen_transfer is not None:
+            return {
+                "success": False,
+                "reopen_discussion": True,
+                **planning_reopen_transfer,
+            }
         if not finish or not finish.get("approved"):
             return finish or result
 
@@ -6698,6 +8586,7 @@ def run_hitl_autoresearch_loop(
     pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
     proposal_mode_config: Optional[ProposalModeConfig] = None,
+    planning_mode_config: Optional[PlanningModeConfig] = None,
 ) -> AutoResearchRunResult:
     """
     Run AutoResearch with NeuriCo's real proposer, comment handler, and scorer.
@@ -6710,6 +8599,7 @@ def run_hitl_autoresearch_loop(
         run_autoresearch_proposer,
     )
     from agents.proposal_discussion import run_proposal_discussion_task
+    from agents.planning_discussion import run_planning_discussion_task
     from agents.proposal_assessment import run_proposal_reviewer, run_proposal_verifier
     from agents.comment_handler import build_comment_handler_launch
     from core.agent_runner import run_prebuilt_cli_agent
@@ -6717,6 +8607,7 @@ def run_hitl_autoresearch_loop(
 
     work_dir = Path(work_dir)
     selected_proposal_mode = normalize_proposal_mode_config(proposal_mode_config)
+    selected_planning_mode = normalize_planning_mode_config(planning_mode_config)
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"
 
@@ -6844,6 +8735,7 @@ def run_hitl_autoresearch_loop(
         role = str(request.pop("role", "")).strip()
         runners = {
             "discussion": run_proposal_discussion_task,
+            "planning_discussion": run_planning_discussion_task,
             "verifier": run_proposal_verifier,
             "reviewer": run_proposal_reviewer,
         }
@@ -6853,11 +8745,41 @@ def run_hitl_autoresearch_loop(
             work_dir=work_dir,
             provider=provider,
             templates_dir=templates_dir,
-            timeout=proposal_timeout,
+            timeout=(
+                comment_timeout
+                if role == "planning_discussion"
+                else proposal_timeout
+            ),
             full_permissions=full_permissions,
             hitl_mode=normalize_hitl_mode(hitl_mode).value,
             **request,
         )
+
+    def planning_discussion_prompt_template_renderer(
+        *,
+        approved_proposal: str,
+        discussion_task_id: str,
+        assigned_candidate_sha: str,
+        autoresearch_attempt: bool,
+    ) -> tuple[str, Dict[str, Any]]:
+        from agents.planning_discussion import planning_discussion_prompt_template
+
+        prompt, prompt_inputs = planning_discussion_prompt_template(
+            idea=idea,
+            work_dir=work_dir,
+            approved_proposal=approved_proposal,
+            discussion_task_id=discussion_task_id,
+            assigned_candidate_sha=assigned_candidate_sha,
+            autoresearch_attempt=autoresearch_attempt,
+            templates_dir=Path(templates_dir),
+            hitl_mode=normalize_hitl_mode(hitl_mode).value,
+            provider=provider,
+        )
+        public_background = dict(prompt_inputs["public_context"])
+        public_background["whiteboard_active_tips_md"] = prompt_inputs[
+            "whiteboard_active_tips_md"
+        ]
+        return prompt, public_background
 
     def scorer(score_work_dir: Path) -> Dict[str, Any]:
         return run_scorer(
@@ -6906,8 +8828,12 @@ def run_hitl_autoresearch_loop(
         pending_hitl_recovery=pending_hitl_recovery,
         hitl_mode=hitl_mode,
         proposal_mode_config=selected_proposal_mode,
+        planning_mode_config=selected_planning_mode,
         additional_agent_runner=additional_agent_runner,
         proposal_assessment_runner=proposal_assessment_runner,
         proposal_prompt_template_renderer=proposal_prompt_template_renderer,
+        planning_discussion_prompt_template_renderer=(
+            planning_discussion_prompt_template_renderer
+        ),
     )
     return controller.run(iterations=iterations)
