@@ -13,6 +13,12 @@ from typing import Any, Callable, Dict, Optional
 
 from core.hitl import HitlRuntime
 from core.hitl_mode import HitlMode
+from core.hitl_planning_mode import (
+    COLLABORATIVE_PLANNING_MODE,
+    PENDING_PLANNING_POLICY_FIELD,
+    PlanningModeConfig,
+    normalize_pending_planning_policy,
+)
 from core.hitl_resource_finder import (
     run_resource_finder_hitl,
     validate_resource_finder_outputs,
@@ -192,6 +198,47 @@ def _run_resource_finder_agent(
             "logs_dir": str(run_logs_dir),
         }
 
+    planning_mode = PlanningModeConfig(mode="single")
+    planning_owner = None
+    planning_record_root = None
+    state = HitlRuntimeState(work_dir)
+    action = state.snapshot().get("next_autoresearch_action")
+    attachment = state.stage_planning_discussion_attachment()
+    policy_present = bool(
+        isinstance(action, dict)
+        and PENDING_PLANNING_POLICY_FIELD in action
+    )
+    raw_policy = (
+        action.get(PENDING_PLANNING_POLICY_FIELD) if policy_present else None
+    )
+    if policy_present:
+        policy = normalize_pending_planning_policy(raw_policy)
+        planning_mode = PlanningModeConfig(
+            mode=COLLABORATIVE_PLANNING_MODE,
+            participant_count=policy["participant_count"],
+            discussion_rounds=policy["discussion_rounds"],
+        )
+    if policy_present or attachment is not None:
+        recovery = action.get("recovery") if isinstance(action, dict) else None
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or not isinstance(recovery, dict)
+            or recovery.get("stage") != "additional_agent"
+        ):
+            raise RuntimeError(
+                "Collaborative resource planning requires its additional-agent recovery boundary."
+            )
+        planning_owner = {
+            "kind": "additional_agent",
+            "pipeline_stage": "resource_finder",
+            "rollback_ref": str(recovery.get("hitl_snapshot_ref", "")).strip(),
+            "parent_node_id": str(provenance.get("parent_node_id", "")).strip(),
+            "attempt_id": str(provenance.get("attempt_id", "")).strip(),
+            "additional_agent_ordinal": ordinal,
+        }
+        planning_record_root = run_logs_dir / "planning_discussion"
+
     def approved(result: Dict[str, Any], finish: Dict[str, Any]) -> Dict[str, Any]:
         return {
             **result,
@@ -237,6 +284,9 @@ def _run_resource_finder_agent(
             force_fresh_plan=True,
             logs_dir=run_logs_dir,
             preserve_log_history=True,
+            planning_mode_config=planning_mode,
+            planning_meeting_owner=planning_owner,
+            planning_meeting_record_root=planning_record_root,
             focused_autoresearch=(
                 PipelineState.read_focused_autoresearch(work_dir)
                 if not focused_managed_ordinary

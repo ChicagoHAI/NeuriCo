@@ -132,9 +132,12 @@ def test_legacy_manager_can_open_without_task(tmp_path):
 
 @pytest.mark.parametrize("mode", ["full", "auto"])
 @pytest.mark.parametrize("focused", [False, True])
-@pytest.mark.parametrize("autoresearch", [False, True])
-def test_pipeline_binds_before_workers(tmp_path, monkeypatch, mode, focused, autoresearch):
+@pytest.mark.parametrize(
+    "autoresearch,planning", [(False, "single"), (True, "single"), (True, "collaborative")]
+)
+def test_pipeline_binds_before_workers(tmp_path, monkeypatch, mode, focused, autoresearch, planning):
     from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+    from core.hitl_planning_mode import normalize_planning_mode_config
 
     owner = ResearchPipelineOrchestrator(
         tmp_path,
@@ -142,6 +145,7 @@ def test_pipeline_binds_before_workers(tmp_path, monkeypatch, mode, focused, aut
         hitl_autoresearch=autoresearch,
         focused_autoresearch=focused,
         hitl_mode=mode,
+        planning_mode_config=normalize_planning_mode_config(planning),
     )
     observed = []
 

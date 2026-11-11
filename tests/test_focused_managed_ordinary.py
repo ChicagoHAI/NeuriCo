@@ -224,6 +224,22 @@ def test_resource_finder_uses_distinct_bootstrap_and_additional_contracts():
     assert "DIRECTION BUDGET" not in additional
 
 
+@pytest.mark.parametrize("focused", [False, True])
+def test_additive_collaborative_discussion_keeps_planning_constraints(focused):
+    prompt = PromptGenerator(ROOT / "templates").generate_resource_finder_prompt(
+        IDEA,
+        hitl_runtime_completion=True,
+        hitl_phase="discussion",
+        invocation_mode="additive",
+        focused_autoresearch=focused,
+    )
+    assert "ADDITIVE INVOCATION — PLANNING CONSTRAINTS" in prompt
+    assert "RESOURCE-FINDER DIRECTION LIMIT" in prompt
+    assert "ADDITIVE INVOCATION — EXISTING WORKSPACE IS AUTHORITATIVE" not in prompt
+    assert "FOCUSED MANAGED ORDINARY RESEARCH" not in prompt
+    assert ("FOCUSED HITL AUTORESEARCH SCOPE" in prompt) == focused
+
+
 @pytest.mark.parametrize("phase", ["plan", "execution", "review"])
 def test_resource_description_is_scoped_and_preserves_existing_context(phase):
     generator = PromptGenerator(ROOT / "templates")

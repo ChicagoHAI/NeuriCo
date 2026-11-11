@@ -20,6 +20,11 @@ from core.config_loader import ConfigLoader  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path  # noqa: E402
 from core.hitl_lock import HitlWorkspaceRunActiveError, hitl_workspace_run_lease  # noqa: E402
 from core.hitl_mode import normalize_hitl_mode  # noqa: E402
+from core.hitl_planning_mode import (  # noqa: E402
+    COLLABORATIVE_PLANNING_MODE,
+    normalize_planning_mode_config,
+    require_managed_autoresearch_planning_mode,
+)
 from core.hitl_proposal_round import (  # noqa: E402
     COLLABORATIVE_PROPOSAL_MODE,
     INDEPENDENT_RANKED_PROPOSAL_MODE,
@@ -69,7 +74,7 @@ def _claim_request(path: Path) -> Path:
 
 def _load_request(path: Path) -> Dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("version") not in {1, 2, 3, 4, 5, 6}:
+    if not isinstance(value, dict) or value.get("version") not in {1, 2, 3, 4, 5, 6, 7}:
         raise ValueError("Unsupported HITL launch request.")
     required = (
         "request_id",
@@ -90,20 +95,43 @@ def _load_request(path: Path) -> Dict[str, Any]:
         raise ValueError("HITL launch request has an unsupported source interface.")
     if value["version"] == 2 and not str(value.get("hitl_mode", "")).strip():
         raise ValueError("HITL launch request is missing its HITL mode.")
-    if value["version"] in {3, 4, 5, 6} and not str(value.get("workflow", "")).strip():
+    if value["version"] in {3, 4, 5, 6, 7} and not str(value.get("workflow", "")).strip():
         raise ValueError("HITL launch request is missing its research workflow.")
-    if value["version"] in {4, 5, 6} and not str(value.get("operation", "")).strip():
+    if value["version"] in {4, 5, 6, 7} and not str(value.get("operation", "")).strip():
         raise ValueError("HITL launch request is missing its operation.")
-    if value["version"] in {5, 6} and not str(value.get("proposal_mode", "")).strip():
+    if value["version"] in {5, 6, 7} and not str(value.get("proposal_mode", "")).strip():
         raise ValueError("HITL launch request is missing its proposal mode.")
     requested_proposal_mode = str(value.get("proposal_mode", "")).strip().lower()
-    if value["version"] == 6:
-        if requested_proposal_mode != COLLABORATIVE_PROPOSAL_MODE:
-            raise ValueError("HITL launch request version 6 requires collaborative mode.")
+    if value["version"] == 6 and requested_proposal_mode != COLLABORATIVE_PROPOSAL_MODE:
+        raise ValueError("HITL launch request version 6 requires collaborative mode.")
+    if requested_proposal_mode == COLLABORATIVE_PROPOSAL_MODE:
         if value.get("participant_count") is None or value.get("discussion_rounds") is None:
             raise ValueError("Collaborative launch request is missing its discussion counts.")
-    elif requested_proposal_mode == COLLABORATIVE_PROPOSAL_MODE:
-        raise ValueError("Collaborative proposal mode requires launch request version 6.")
+        if value["version"] not in {6, 7}:
+            raise ValueError(
+                "Collaborative proposal mode requires launch request version 6 or 7."
+            )
+    requested_planning_mode = str(value.get("planning_mode", "")).strip().lower()
+    planning_fields_present = any(
+        field in value
+        for field in (
+            "planning_mode",
+            "planning_participant_count",
+            "planning_discussion_rounds",
+        )
+    )
+    if value["version"] == 7:
+        if requested_planning_mode != COLLABORATIVE_PLANNING_MODE:
+            raise ValueError("HITL launch request version 7 requires collaborative planning.")
+        if (
+            value.get("planning_participant_count") is None
+            or value.get("planning_discussion_rounds") is None
+        ):
+            raise ValueError(
+                "Collaborative planning launch request is missing its discussion counts."
+            )
+    elif planning_fields_present:
+        raise ValueError("Planning fields require launch request version 7.")
     value["workflow"] = str(value.get("workflow", "autoresearch")).strip().lower()
     if value["workflow"] not in {"ordinary", "autoresearch"}:
         raise ValueError("HITL launch request has an unsupported research workflow.")
@@ -155,6 +183,24 @@ def _load_request(path: Path) -> Dict[str, Any]:
         value.pop("reviewer_count", None)
         value.pop("participant_count", None)
         value.pop("discussion_rounds", None)
+    planning_mode_config = require_managed_autoresearch_planning_mode(
+        normalize_planning_mode_config(
+            value.get("planning_mode"),
+            participant_count=value.get("planning_participant_count"),
+            discussion_rounds=value.get("planning_discussion_rounds"),
+        ),
+        managed_autoresearch=(
+            value["operation"] == "research" and value["workflow"] == "autoresearch"
+        ),
+    )
+    if planning_mode_config.mode == COLLABORATIVE_PLANNING_MODE:
+        value["planning_mode"] = planning_mode_config.mode
+        value["planning_participant_count"] = planning_mode_config.participant_count
+        value["planning_discussion_rounds"] = planning_mode_config.discussion_rounds
+    else:
+        value.pop("planning_mode", None)
+        value.pop("planning_participant_count", None)
+        value.pop("planning_discussion_rounds", None)
 
     identity = _REQUEST_NAME.fullmatch(path.name)
     if identity is None:
@@ -300,6 +346,11 @@ def main() -> int:
             participant_count=request.get("participant_count"),
             discussion_rounds=request.get("discussion_rounds"),
         )
+        planning_mode_config = normalize_planning_mode_config(
+            request.get("planning_mode"),
+            participant_count=request.get("planning_participant_count"),
+            discussion_rounds=request.get("planning_discussion_rounds"),
+        )
         project_root = PROJECT_ROOT.resolve()
         _load_project_environment(project_root)
         request_id = str(request["request_id"])
@@ -381,6 +432,7 @@ def main() -> int:
                     "hitl_mode": hitl_mode,
                     "hitl_work_dir": work_dir,
                     "proposal_mode_config": proposal_mode_config,
+                    "planning_mode_config": planning_mode_config,
                 }
                 if request.get("operation") == "construct_baseline":
                     run_args["hitl_construct_baseline"] = str(request["interface"])

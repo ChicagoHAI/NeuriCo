@@ -428,6 +428,18 @@ class HitlTerminalUI:
                 "  Proposals: Collaborative"
                 f" ({participant_count} participants, {discussion_rounds} response rounds)"
             )
+        if live.get("planning_mode") == "collaborative":
+            planning_participant_count = terminal_safe_text(
+                live.get("planning_participant_count") or ""
+            ).strip()
+            planning_discussion_rounds = terminal_safe_text(
+                live.get("planning_discussion_rounds") or ""
+            ).strip()
+            lines.append(
+                "  Planning: Collaborative"
+                f" ({planning_participant_count} participants, "
+                f"{planning_discussion_rounds} response rounds)"
+            )
         if detail:
             lines.extend(self._wrap_paragraph(detail, indent="  "))
         if next_action:
