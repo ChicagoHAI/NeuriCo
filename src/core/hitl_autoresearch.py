@@ -1510,12 +1510,14 @@ def _validate_budget_preparation_cleanup(value: Any) -> Dict[str, Any]:
     parent = str(value.get("parent_node_sha", "")).strip()
     action_status = str(value.get("action_status", "")).strip()
     recovery = value.get("recovery")
+    task_context = value.get("task_context")
     prepared_artifacts = value.get("proposal_artifact_snapshot_id")
     if (
         status not in _BUDGET_PREPARATION_CLEANUP_STATUSES
         or not parent
         or action_status not in {"pending", "decision_recorded", "resolved", "cancelled"}
         or (recovery is not None and not isinstance(recovery, dict))
+        or (task_context is not None and not isinstance(task_context, dict))
         or (
             prepared_artifacts is not None
             and (
@@ -1538,7 +1540,18 @@ def _begin_budget_preparation_cleanup(
     stop = _read_budget_exhausted_stop(work_dir, request_id)
     existing = stop.get(_BUDGET_PREPARATION_CLEANUP_KEY)
     if existing is not None:
-        return _validate_budget_preparation_cleanup(existing)
+        cleanup = _validate_budget_preparation_cleanup(existing)
+        # Upgrade an older pending cleanup before its restore can erase the task.
+        task_context = HitlRuntimeState(work_dir).task_context()
+        if (
+            cleanup["status"] == "prepared"
+            and "task_context" not in cleanup
+            and task_context is not None
+        ):
+            cleanup["task_context"] = task_context
+            stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
+            atomic_write_json(path, stop, ensure_ascii=True, indent=2)
+        return cleanup
 
     action = HitlRuntimeState(work_dir).snapshot().get("next_autoresearch_action")
     if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
@@ -1558,6 +1571,7 @@ def _begin_budget_preparation_cleanup(
             raise RuntimeError("Proposal preparation has invalid recovery state.")
         HitlStageRollback.from_descriptor(work_dir, recovery)
 
+    task_context = HitlRuntimeState(work_dir).task_context()
     cleanup = {
         "version": 1,
         "status": "prepared",
@@ -1573,6 +1587,7 @@ def _begin_budget_preparation_cleanup(
             else {}
         ),
         **({"recovery": dict(recovery)} if isinstance(recovery, dict) else {}),
+        **({"task_context": task_context} if task_context is not None else {}),
     }
     stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
     atomic_write_json(path, stop, ensure_ascii=True, indent=2)
@@ -1628,6 +1643,10 @@ def _finalize_budget_exhausted_preparation(
                 clean_untracked_public=True,
             )
             rollback.state_store.restore(rollback.hitl_snapshot)
+
+        # The durable cleanup retains the task even if interrupted after restore.
+        if cleanup.get("task_context") is not None:
+            HitlRuntimeState(work_dir).bind_task_context(cleanup["task_context"])
 
         request_key = HitlRuntimeState(
             work_dir
