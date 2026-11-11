@@ -281,6 +281,61 @@ def test_prestart_initializer_does_not_refresh_saved_task(tmp_path, monkeypatch)
     assert state.task_context() == saved
 
 
+def test_prestart_resource_paths_match_staging_without_exposing_host_paths(tmp_path, monkeypatch):
+    from cli import hitl_launcher
+    from core.local_resources import stage_local_resources
+
+    host = tmp_path / "host"
+    host.mkdir()
+    dataset = host / "rows.csv"
+    dataset.write_text("x\n1\n")
+    function = host / "evaluate.py"
+    function.write_text("def evaluate(): return 1\n")
+    work_dir = tmp_path / "workspace"
+    work_dir.mkdir()
+    source = idea()
+    source["idea"]["local_resources"] = {
+        "datasets": [
+            {"path": str(dataset), "name": "training"},
+            {"path": str(dataset), "name": "training"},
+        ],
+        "functions": [{"path": str(function), "entrypoint": "evaluate"}],
+    }
+    source["idea"]["background"]["papers"] = [
+        {"path": str(host / "ref.pdf"), "description": "Reference", "url": "https://example.org/ref"},
+        {"path": "papers/relative.pdf"},
+        {"path": str(work_dir / "papers/workspace.pdf")},
+        {"path": "~/private/ref.pdf", "description": "Other reference"},
+        {"path": "https://example.org/remote.pdf"},
+    ]
+    original = deepcopy(source)
+    monkeypatch.setattr(
+        hitl_launcher, "IdeaManager", lambda path: SimpleNamespace(get_idea=lambda id: source)
+    )
+    hitl_launcher.initialize_manager_task(tmp_path, "task", work_dir)
+    bound = HitlRuntimeState(work_dir).task_context()
+    messages = manager(work_dir)._messages(0, [])
+    assert task_from(messages) == bound
+    assert str(host) not in str(messages)
+    assert "/host/private/input.yaml" not in str(messages)
+    assert not (work_dir / "datasets").exists()
+    assert not (work_dir / "code").exists()
+    assert source == original
+    assert bound["idea"]["background"]["papers"] == [
+        {"description": "Reference", "url": "https://example.org/ref"},
+        {"path": "papers/relative.pdf"},
+        {"path": "papers/workspace.pdf"},
+        {"description": "Other reference"},
+        {"path": "https://example.org/remote.pdf"},
+    ]
+    staged = deepcopy(source)
+    stage_local_resources(work_dir, staged)
+    for kind in ("datasets", "functions"):
+        assert [e["path"] for e in bound["idea"]["local_resources"][kind]] == [
+            e["path"] for e in staged["idea"]["local_resources"][kind]
+        ]
+
+
 @pytest.mark.parametrize("workflow", ["ordinary", "autoresearch"])
 def test_runner_supplies_prepared_task_before_starting_manager(tmp_path, monkeypatch, workflow):
     from contextlib import ExitStack

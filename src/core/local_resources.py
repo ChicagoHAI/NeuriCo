@@ -368,6 +368,51 @@ def workspace_contract_copy(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
     return clean
 
 
+def manager_task_copy(work_dir: Path, idea_spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Project declared resources into workspace paths without staging files.
+
+    Pre-Start managers receive the same destination names as the runner. These
+    paths describe intended destinations; their presence does not imply that
+    staging has finished. Local papers have no staging protocol, so host-only
+    paper paths are omitted while their other reference information survives.
+    """
+    import copy
+
+    clean = copy.deepcopy(idea_spec)
+    idea = clean.get('idea')
+    if not isinstance(idea, dict):
+        return clean
+
+    resources = idea.get('local_resources')
+    if isinstance(resources, dict):
+        for kind in ('datasets', 'functions'):
+            entries = resources.get(kind)
+            if not isinstance(entries, list):
+                continue
+            taken: set = set()
+            for entry in entries:
+                if not isinstance(entry, dict) or not entry.get('path'):
+                    continue
+                dst, _ = _planned_destination(work_dir, kind, entry, taken)
+                entry['path'] = dst.relative_to(work_dir).as_posix()
+
+    background = idea.get('background')
+    if isinstance(background, dict):
+        for paper in background.get('papers') or []:
+            if not isinstance(paper, dict) or not paper.get('path'):
+                continue
+            path = str(paper['path'])
+            if Path(path).is_absolute():
+                try:
+                    paper['path'] = Path(path).relative_to(work_dir).as_posix()
+                except ValueError:
+                    paper.pop('path')
+            elif path.startswith('~'):
+                paper.pop('path')
+
+    return workspace_contract_copy(clean)
+
+
 def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
                           base_dir: Path = None, *, preserve_existing: bool = False,
                           write_workspace_contract: bool = True) -> int:

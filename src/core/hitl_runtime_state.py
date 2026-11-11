@@ -320,7 +320,7 @@ class HitlRuntimeState:
         rollback, which may differ from its newly loaded idea on resume.
         """
         from core.compute_backend import without_runtime_compute_backend
-        from core.local_resources import workspace_contract_copy
+        from core.local_resources import manager_task_copy
 
         with self._locked():
             self._state = self._load_unlocked() or self._default()
@@ -332,7 +332,7 @@ class HitlRuntimeState:
                 or bool(self._state.get("frontier_decision_transition"))
             )
             if saved is None or (prepare_run and not held):
-                saved = workspace_contract_copy(without_runtime_compute_backend(idea))
+                saved = manager_task_copy(self.work_dir, without_runtime_compute_backend(idea))
                 saved = json.loads(json.dumps(
                     saved, ensure_ascii=False, default=_task_json_scalar
                 ))
