@@ -72,6 +72,33 @@ def test_binding_preserves_full_task_and_caller(tmp_path):
     assert HitlRuntimeState(tmp_path).task_context() == state.task_context()
 
 
+def test_binding_normalizes_yaml_dates_without_mutating_idea(tmp_path):
+    source = yaml.safe_load("""
+idea:
+  constraints:
+    deadline: 2026-11-09
+    milestones:
+      - at: 2026-11-09T12:30:00Z
+        required: true
+        count: 2
+""")
+    original = deepcopy(source)
+    bound = HitlRuntimeState(tmp_path).bind_task_context(source)
+    assert bound["idea"]["constraints"] == {
+        "deadline": "2026-11-09",
+        "milestones": [{"at": "2026-11-09T12:30:00+00:00", "required": True, "count": 2}],
+    }
+    assert HitlRuntimeState(tmp_path).task_context() == bound
+    assert source == original
+
+
+def test_binding_rejects_unknown_objects(tmp_path):
+    state = HitlRuntimeState(tmp_path)
+    with pytest.raises(TypeError, match="Unsupported task-context value: object"):
+        state.bind_task_context({"idea": {"constraints": {"custom": object()}}})
+    assert HitlRuntimeState(tmp_path).task_context() is None
+
+
 @pytest.mark.parametrize("mode", ["full", "auto"])
 def test_manager_receives_task_outside_history_after_compaction_and_restart(tmp_path, mode):
     value = manager(tmp_path, mode, tokens=4000)

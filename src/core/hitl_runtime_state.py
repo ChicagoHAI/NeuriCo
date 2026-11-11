@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
@@ -43,6 +44,13 @@ UNRESOLVED_WORKER_COMMAND_STATUSES = frozenset(
 )
 MAX_INTERFACE_EVENTS = 500
 LOGGER = logging.getLogger(__name__)
+
+
+def _task_json_scalar(value: Any) -> str:
+    """Represent YAML dates/timestamps without coercing unrelated objects."""
+    if isinstance(value, date):
+        return value.isoformat()
+    raise TypeError(f"Unsupported task-context value: {type(value).__name__}")
 _LOCAL_ATTEMPT_ID = re.compile(r"^attempt_[0-9]+$")
 _IDEA_ID = re.compile(r"^I[0-9]+$")
 _PROPOSAL_ROUND_STAGES = {
@@ -325,7 +333,10 @@ class HitlRuntimeState:
             )
             if saved is None or (prepare_run and not held):
                 saved = workspace_contract_copy(without_runtime_compute_backend(idea))
-                self._state["task_context"] = self._copy(saved)
+                saved = json.loads(json.dumps(
+                    saved, ensure_ascii=False, default=_task_json_scalar
+                ))
+                self._state["task_context"] = saved
                 self._save_unlocked()
             return self._copy(saved)
 
