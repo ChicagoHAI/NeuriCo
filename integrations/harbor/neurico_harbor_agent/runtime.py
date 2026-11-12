@@ -15,6 +15,8 @@ from typing import Any, Literal
 
 from src.cli.submit_local import _convert_without_llm
 
+HarborWorkflow = Literal["autoresearch", "focused-managed-ordinary"]
+
 
 @dataclass(frozen=True)
 class HarborAutoResearchTask:
@@ -182,18 +184,25 @@ def _find_codex_auth_file(environment: Mapping[str, str]) -> Path | None:
     return None
 
 
-def _title_from_instruction(instruction: str) -> str:
+def _title_from_instruction(instruction: str, *, workflow: HarborWorkflow = "autoresearch") -> str:
     """Derive only the schema-required title; preserve the full task elsewhere."""
     first_line = next((line.strip() for line in instruction.splitlines() if line.strip()), "")
     first_line = re.sub(r"^#{1,6}\s+", "", first_line)
     first_line = re.sub(r"\s+", " ", first_line).strip()
     title = first_line[:197].rstrip()
     if len(title) < 10:
-        title = f"Harbor AutoResearch: {title or 'Research task'}"
+        label = (
+            "Harbor AutoResearch"
+            if workflow == "autoresearch"
+            else "Harbor focused managed ordinary research"
+        )
+        title = f"{label}: {title or 'Research task'}"
     return title
 
 
-def build_harbor_idea(task: HarborAutoResearchTask) -> dict[str, Any]:
+def build_harbor_idea(
+    task: HarborAutoResearchTask, *, workflow: HarborWorkflow = "autoresearch"
+) -> dict[str, Any]:
     """Use NeuriCo's local converter to wrap a Harbor instruction as an idea.
 
     The complete instruction is retained in ``background.description``, which
@@ -203,9 +212,9 @@ def build_harbor_idea(task: HarborAutoResearchTask) -> dict[str, Any]:
     converted = _convert_without_llm(
         {
             "path": "harbor://instruction",
-            "title": _title_from_instruction(task.instruction),
+            "title": _title_from_instruction(task.instruction, workflow=workflow),
             "description": task.instruction,
-            "tags": ["harbor", "autoresearch"],
+            "tags": ["harbor", workflow],
             "author": None,
             "raw_text": task.instruction,
         }

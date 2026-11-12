@@ -1,11 +1,25 @@
 # NeuriCo Harbor agent
 
 This directory is the locked ACP runtime for using NeuriCo's manager-driven
-AutoResearch as a Harbor agent. The adapter converts Harbor's prompt through
-NeuriCo's existing local-idea converter and launches fresh HITL AutoResearch in
+AutoResearch or focused managed ordinary research as a Harbor agent. The adapter
+converts Harbor's prompt through NeuriCo's existing local-idea converter and runs in
 headless Auto mode inside Harbor's supplied repository, using NeuriCo's Codex
 provider. Auto mode uses the manager for every review boundary but never waits
 for human input.
+
+## Workflow selection
+
+`NEURICO_HARBOR_WORKFLOW` selects `autoresearch` (the unchanged default) or
+`focused-managed-ordinary`. Focused managed ordinary uses the native resource
+finder and experiment runner with the manager in Auto mode, including the normal
+planning, review, revision, and completion boundaries. It enables focused mode
+and disables internal scoring, the AutoResearch improvement loop, paper writing,
+and scribe output. Harbor's verifier evaluates the delivered task solution.
+
+`NEURICO_HARBOR_AUTORESEARCH_ITERATIONS` and
+`NEURICO_HARBOR_TIME_LIMIT_SECONDS` apply only to AutoResearch and are ignored
+by focused managed ordinary. Harbor's configured task timeout still applies to
+both workflows. Both reuse the existing supervisor and native cooperative stop.
 
 ## Contract
 
@@ -15,14 +29,14 @@ for human input.
 - Harbor's complete text prompt is preserved in
   `idea.background.description`. NeuriCo's prompt generator already promotes
   that field as high-priority user instructions.
-- NeuriCo runs fresh manager-driven HITL AutoResearch in Auto mode. The manager
+- By default, NeuriCo runs fresh manager-driven HITL AutoResearch in Auto mode. The manager
   reviews resource-finder, rule-maker, experiment, and scoring boundaries and
   may request repairs or replacement workers without human interaction. The
   resource finder may use Harbor's supplied repository and any external sources
   allowed by the task's Harbor network policy. The scored lifecycle then
   continues with a baseline experiment, scoring, proposals, candidate
   experiments, and manager-governed accept-or-restore checkpointing.
-- The adapter is benchmark-focused. Internal scoring is enabled, while paper
+- The adapter is benchmark-focused. AutoResearch enables internal scoring, while paper
   generation and scribe/notebook output are always disabled. Harbor's verifier
   remains the authoritative benchmark result after the agent exits.
 - One AutoResearch improvement iteration is used by default, matching
@@ -61,7 +75,7 @@ for human input.
   `HOSTED_INFERENCE_URL`. Direct OpenAI API mode accepts `OPENAI_API_KEY` and
   optional `OPENAI_BASE_URL`.
 - NeuriCo's idea registry and Codex home are kept in a temporary control
-  directory outside the task repository. Research state and the retained best
+  directory outside the task repository. Research state and the delivered
   implementation remain in Harbor's workspace.
 - The Harbor parent supervisor performs trace collection, but
   `/logs/artifacts/` is an agent-controlled Harbor publication channel rather

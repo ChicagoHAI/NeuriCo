@@ -1,4 +1,4 @@
-"""ACP adapter that supervises NeuriCo's existing AutoResearch mode."""
+"""ACP adapter that supervises NeuriCo's existing managed research workflows."""
 
 from __future__ import annotations
 
@@ -45,6 +45,7 @@ from acp.schema import (
 from .runtime import (
     CodexInferenceConnection,
     HarborAutoResearchTask,
+    HarborWorkflow,
     build_autoresearch_environment,
 )
 from .artifacts import (
@@ -103,6 +104,16 @@ def _text_from_prompt(prompt: list[ContentBlock]) -> str:
             {"prompt": "NeuriCo's Harbor adapter requires a text instruction"}
         )
     return "".join(text_parts)
+
+
+def _harbor_workflow(environment: dict[str, str]) -> HarborWorkflow:
+    raw = environment.get("NEURICO_HARBOR_WORKFLOW", "autoresearch")
+    if raw not in {"autoresearch", "focused-managed-ordinary"}:
+        raise ValueError(
+            "NEURICO_HARBOR_WORKFLOW must be 'autoresearch' or "
+            "'focused-managed-ordinary'"
+        )
+    return raw
 
 
 def _autoresearch_iterations(environment: dict[str, str]) -> int:
@@ -360,14 +371,15 @@ async def run_autoresearch_process(
     task: HarborAutoResearchTask,
     connection: CodexInferenceConnection,
     base_environment: dict[str, str],
-    iterations: int,
+    iterations: int | None,
     time_limit_seconds: int | None,
     run_id: str,
     emit: OutputHandler,
     register_process: Callable[[asyncio.subprocess.Process], bool],
     cancellation_requested: Callable[[], bool] | None = None,
+    workflow: HarborWorkflow = "autoresearch",
 ) -> int:
-    """Supervise AutoResearch and finalize its trace only after the child stops."""
+    """Supervise managed research and finalize its trace after the child stops."""
     started_at = datetime.now(timezone.utc).isoformat()
     started_monotonic = time.monotonic()
     process: asyncio.subprocess.Process | None = None
@@ -376,17 +388,22 @@ async def run_autoresearch_process(
     forced_termination = False
     supervisor_error_type: str | None = None
     run_configuration = {
-        "workflow": "autoresearch",
+        "workflow": workflow,
         "run_id": run_id,
         "provider": "codex",
         "requested_model": connection.requested_model,
         "hitl_mode": "auto",
-        "scoring_enabled": True,
+        "scoring_enabled": workflow == "autoresearch",
         "benchmark_mode": True,
-        "autoresearch_iterations": iterations,
-        "time_limit_seconds": time_limit_seconds,
         "workspace_mode": "embedded",
     }
+    if workflow == "autoresearch":
+        run_configuration.update(
+            autoresearch_iterations=iterations, time_limit_seconds=time_limit_seconds
+        )
+    else:
+        time_limit_seconds = None
+        run_configuration["focused_autoresearch"] = True
     preflight_task = asyncio.create_task(
         asyncio.to_thread(
             _prepare_trace_preflight,
@@ -457,11 +474,13 @@ async def run_autoresearch_process(
                 str(task.workspace),
                 "--ideas-dir",
                 str(ideas_dir),
-                "--iterations",
-                str(iterations),
+                "--workflow",
+                workflow,
             ]
-            if time_limit_seconds is not None:
-                command.extend(["--time-limit-seconds", str(time_limit_seconds)])
+            if workflow == "autoresearch":
+                command.extend(["--iterations", str(iterations)])
+                if time_limit_seconds is not None:
+                    command.extend(["--time-limit-seconds", str(time_limit_seconds)])
 
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -533,7 +552,7 @@ async def run_autoresearch_process(
             outcome = "supervisor_error"
         elif return_code == 0:
             outcome = "success"
-        elif return_code == _TIME_LIMIT_EXIT_CODE:
+        elif workflow == "autoresearch" and return_code == _TIME_LIMIT_EXIT_CODE:
             outcome = "time_limit"
         else:
             outcome = "failed"
@@ -572,7 +591,7 @@ async def run_autoresearch_process(
 
 
 class NeuricoHarborAgent(Agent):
-    """A Harbor ACP surface for NeuriCo's fresh AutoResearch workflow."""
+    """A Harbor ACP surface for NeuriCo's supported managed workflows."""
 
     def __init__(self, environment: dict[str, str] | None = None) -> None:
         self._environment = dict(os.environ if environment is None else environment)
@@ -615,7 +634,7 @@ class NeuricoHarborAgent(Agent):
             SessionConfigOptionSelect(
                 id="model",
                 name="Model",
-                description="Model selected by Harbor for every NeuriCo AutoResearch agent",
+                description="Model selected by Harbor for every NeuriCo agent",
                 category="model",
                 type="select",
                 current_value=model,
@@ -712,7 +731,7 @@ class NeuricoHarborAgent(Agent):
             raise RequestError.resource_not_found(session_id)
         if session.active_task is not None:
             raise RequestError.invalid_params(
-                {"session_id": "A NeuriCo AutoResearch run is already active"}
+                {"session_id": "A NeuriCo run is already active"}
             )
 
         task = HarborAutoResearchTask(
@@ -723,8 +742,13 @@ class NeuricoHarborAgent(Agent):
             self._environment,
             requested_model=session.model,
         )
-        iterations = _autoresearch_iterations(self._environment)
-        time_limit_seconds = _autoresearch_time_limit(self._environment)
+        workflow = _harbor_workflow(self._environment)
+        iterations = (
+            _autoresearch_iterations(self._environment) if workflow == "autoresearch" else None
+        )
+        time_limit_seconds = (
+            _autoresearch_time_limit(self._environment) if workflow == "autoresearch" else None
+        )
         session.cancelled = False
         session.active_task = asyncio.current_task()
 
@@ -737,6 +761,7 @@ class NeuricoHarborAgent(Agent):
                 task=task,
                 connection=connection,
                 base_environment=self._environment,
+                workflow=workflow,
                 iterations=iterations,
                 time_limit_seconds=time_limit_seconds,
                 run_id=f"{session_id}-{uuid4().hex}",
@@ -746,7 +771,7 @@ class NeuricoHarborAgent(Agent):
             )
             if session.cancelled:
                 return PromptResponse(stop_reason="cancelled")
-            if return_code == _TIME_LIMIT_EXIT_CODE:
+            if workflow == "autoresearch" and return_code == _TIME_LIMIT_EXIT_CODE:
                 await self._send_text(
                     session_id,
                     "NeuriCo reached its configured run-time limit and completed native "
@@ -756,11 +781,15 @@ class NeuricoHarborAgent(Agent):
                 return PromptResponse(stop_reason="end_turn")
             if return_code != 0:
                 raise RuntimeError(
-                    f"NeuriCo AutoResearch exited unsuccessfully with status {return_code}"
+                    f"NeuriCo {workflow} exited unsuccessfully with status {return_code}"
                 )
             await self._send_text(
                 session_id,
-                "NeuriCo AutoResearch completed; the workspace is at its retained best checkpoint.\n",
+                (
+                    "NeuriCo AutoResearch completed; the workspace is at its retained best checkpoint.\n"
+                    if workflow == "autoresearch"
+                    else "NeuriCo focused managed ordinary research completed.\n"
+                ),
             )
             return PromptResponse(stop_reason="end_turn")
         finally:
