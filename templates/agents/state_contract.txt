@@ -23,7 +23,7 @@ Keep the notes concise enough to be useful as a handoff. If STATE.md does not
 exist, create it with the marker pair above before starting Phase 1. Do not
 claim a phase is complete until its expected artifacts exist on disk.
 
-{% if not focused_autoresearch %}
+{% if not focused_autoresearch and not focused_managed_ordinary %}
 DIRECTION BUDGET
 ────────────────────────────────────────────────────────────────────────────────
 

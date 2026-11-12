@@ -747,7 +747,7 @@ class HitlWorkspaceView:
         pipeline_focus = pipeline.get("focused_autoresearch")
         if pipeline_focus is not None and type(pipeline_focus) is not bool:
             raise HitlWorkspaceViewError(
-                "Pipeline state has an invalid focused AutoResearch setting."
+                "Pipeline state has an invalid focused-mode setting."
             )
         launch_status = self._launch_status() if not pipeline else {}
         transient_focus = (owner or {}).get(
@@ -911,7 +911,7 @@ class HitlWorkspaceView:
                 "workflow": workflow if workflow in {"ordinary", "autoresearch"} else "autoresearch",
                 "workflow_locked": workflow_locked,
                 "focused_autoresearch": (
-                    focused_autoresearch if workflow == "autoresearch" else False
+                    focused_autoresearch if operation == "research" else False
                 ),
                 "hitl_mode": hitl_mode if hitl_mode in {"full", "auto"} else "full",
                 "provider": provider,

@@ -143,10 +143,8 @@ def _load_request(path: Path) -> Dict[str, Any]:
     focused_autoresearch = value.get("focused_autoresearch", False)
     if type(focused_autoresearch) is not bool:
         raise ValueError("HITL launch request has an invalid focused-mode setting.")
-    if focused_autoresearch and (
-        value["operation"] != "research" or value["workflow"] != "autoresearch"
-    ):
-        raise ValueError("Focused mode is supported only for AutoResearch.")
+    if focused_autoresearch and value["operation"] != "research":
+        raise ValueError("Focused mode is supported only for research runs.")
     value["focused_autoresearch"] = focused_autoresearch
     from core.hitl_run_control import validate_run_time_limit
 
@@ -273,8 +271,7 @@ def _finalize_stopped_run(
             "provider": request.get("provider", ""),
             **(
                 {"focused_autoresearch": request.get("focused_autoresearch", False)}
-                if request.get("workflow") == "autoresearch"
-                and request.get("operation", "research") == "research"
+                if request.get("operation", "research") == "research"
                 else {}
             ),
             "reason": stop_reason,
@@ -310,8 +307,7 @@ def _finalize_stopped_run(
                 "provider": request.get("provider", ""),
                 **(
                     {"focused_autoresearch": request.get("focused_autoresearch", False)}
-                    if request.get("workflow") == "autoresearch"
-                    and request.get("operation", "research") == "research"
+                    if request.get("operation", "research") == "research"
                     else {}
                 ),
                 "recovery_required": True,
@@ -387,8 +383,7 @@ def main() -> int:
                     "interface": request["interface"],
                     **(
                         {"focused_autoresearch": request["focused_autoresearch"]}
-                        if request["workflow"] == "autoresearch"
-                        and request.get("operation", "research") == "research"
+                        if request.get("operation", "research") == "research"
                         else {}
                     ),
                 },
@@ -412,8 +407,7 @@ def main() -> int:
                 "provider": request["provider"],
                 **(
                     {"focused_autoresearch": request["focused_autoresearch"]}
-                    if request["workflow"] == "autoresearch"
-                    and request.get("operation", "research") == "research"
+                    if request.get("operation", "research") == "research"
                     else {}
                 ),
             },
@@ -444,6 +438,7 @@ def main() -> int:
                     run_args["hitl_construct_baseline"] = str(request["interface"])
                 elif request["workflow"] == "ordinary":
                     run_args["hitl_research"] = str(request["interface"])
+                    run_args["focused_autoresearch"] = request["focused_autoresearch"]
                 else:
                     run_args.update(
                         autoresearch_iterations=int(request.get("iterations", 1)),
@@ -481,8 +476,7 @@ def main() -> int:
             "provider": request["provider"],
             **(
                 {"focused_autoresearch": request["focused_autoresearch"]}
-                if request["workflow"] == "autoresearch"
-                and request.get("operation", "research") == "research"
+                if request.get("operation", "research") == "research"
                 else {}
             ),
             "success": bool(result.get("success", False)),
@@ -528,8 +522,7 @@ def main() -> int:
                     "provider": request.get("provider", ""),
                     **(
                         {"focused_autoresearch": request.get("focused_autoresearch", False)}
-                        if request.get("workflow") == "autoresearch"
-                        and request.get("operation", "research") == "research"
+                        if request.get("operation", "research") == "research"
                         else {}
                     ),
                     **(

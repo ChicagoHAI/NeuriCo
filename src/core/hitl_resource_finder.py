@@ -64,6 +64,7 @@ def run_resource_finder_hitl(
     objective: str = "",
     invocation_mode: str = "bootstrap",
     focused_autoresearch: bool = False,
+    focused_managed_ordinary: bool = False,
     provenance: Optional[Dict[str, Any]] = None,
     resume_worker: Optional[ResumeHook] = None,
     force_fresh_plan: bool = False,
@@ -90,6 +91,7 @@ def run_resource_finder_hitl(
             objective=objective,
             invocation_mode=invocation_mode,
             focused_autoresearch=focused_autoresearch,
+            focused_managed_ordinary=focused_managed_ordinary,
         )
         for phase in ("plan", "execution", "review")
     }

@@ -152,7 +152,8 @@ class PromptGenerator:
                                  root_dir: Optional[Path] = None,
                                  scoring_enabled: bool = False,
                                  include_implicit_time_limit: bool = True,
-                                 focused_autoresearch: bool = False) -> str:
+                                 focused_autoresearch: bool = False,
+                                 focused_managed_ordinary: bool = False) -> str:
         """
         Generate the main research prompt from an idea specification.
 
@@ -214,6 +215,7 @@ class PromptGenerator:
         # Prepare variables for template rendering
         variables = self._prepare_variables(idea_spec, root_dir)
         variables['focused_autoresearch'] = bool(focused_autoresearch)
+        variables['focused_managed_ordinary'] = bool(focused_managed_ordinary)
 
         # Compose the full prompt
         prompt_parts = [
@@ -786,7 +788,8 @@ it fits.
                                        provider: str = "claude",
                                        scoring_enabled: bool = False,
                                        phase_name: str = "experiment_runner",
-                                       focused_autoresearch: bool = False) -> str:
+                                       focused_autoresearch: bool = False,
+                                       focused_managed_ordinary: bool = False) -> str:
         """
         Generate session instructions from template.
 
@@ -858,6 +861,7 @@ and the general workflow, ALWAYS follow the user's instructions.
                 'max_directions': max_directions,
                 'phase_name': phase_name,
                 'focused_autoresearch': bool(focused_autoresearch),
+                'focused_managed_ordinary': bool(focused_managed_ordinary),
             },
         )
 
@@ -873,6 +877,7 @@ and the general workflow, ALWAYS follow the user's instructions.
             'max_directions': max_directions,
             'state_contract': state_contract,
             'focused_autoresearch': bool(focused_autoresearch),
+            'focused_managed_ordinary': bool(focused_managed_ordinary),
         }
 
         rendered = self.render_template(template, variables)
@@ -985,6 +990,7 @@ substitutes.
         objective: str = "",
         invocation_mode: str = "bootstrap",
         focused_autoresearch: bool = False,
+        focused_managed_ordinary: bool = False,
     ) -> str:
         """
         Generate resource finder prompt from template.
@@ -1214,6 +1220,7 @@ RESEARCH DOMAIN:
                     'max_directions': max_directions,
                     'phase_name': 'resource_finder',
                     'focused_autoresearch': bool(focused_autoresearch),
+                    'focused_managed_ordinary': bool(focused_managed_ordinary),
                 },
             )
         full_prompt = research_context + "\n" + state_contract + "\n" + template
@@ -1231,13 +1238,16 @@ replacing dependency files, or installing packages. Consider only focused
 resource additions needed for the supplied objective.
 """
             else:
-                full_prompt += """
+                workspace_label = (
+                    "managed research" if focused_managed_ordinary else "AutoResearch"
+                )
+                full_prompt += f"""
 
 ═══════════════════════════════════════════════════════════════════════════════
               ADDITIVE INVOCATION — EXISTING WORKSPACE IS AUTHORITATIVE
 ═══════════════════════════════════════════════════════════════════════════════
 
-This invocation runs inside an established AutoResearch workspace. Preserve the
+This invocation runs inside an established {workspace_label} workspace. Preserve the
 existing project, environment, dependency metadata, and useful resources.
 
 - Do NOT create, recreate, or replace `.venv`.
@@ -1251,7 +1261,13 @@ These additive-invocation rules override any bootstrap or package-installation
 instruction elsewhere in the resource-finder template.
 """
 
-        if focused_autoresearch:
+        if focused_managed_ordinary:
+            focused_contract = self.render_template(
+                self.load_template("hitl/focused_managed_ordinary_resource_finder.txt"),
+                {"invocation_mode": invocation_mode},
+            ).strip()
+            full_prompt += f"\n\n{focused_contract}\n"
+        elif focused_autoresearch:
             focused_contract = self.render_template(
                 self.load_template("hitl/focused_autoresearch_resource_finder.txt"),
                 {"invocation_mode": invocation_mode},

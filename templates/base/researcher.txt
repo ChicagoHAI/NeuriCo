@@ -30,7 +30,7 @@ Use these resources to inform your experimental design.
                         RESEARCH METHODOLOGY
 ═══════════════════════════════════════════════════════════════════════════════
 
-{% if focused_autoresearch %}PHASE 0: MOTIVATION & APPROACH RATIONALE (CRITICAL - DO NOT SKIP){% else %}PHASE 0: MOTIVATION & NOVELTY ASSESSMENT (CRITICAL - DO NOT SKIP){% endif %}
+{% if focused_managed_ordinary or focused_autoresearch %}PHASE 0: MOTIVATION & APPROACH RATIONALE (CRITICAL - DO NOT SKIP){% else %}PHASE 0: MOTIVATION & NOVELTY ASSESSMENT (CRITICAL - DO NOT SKIP){% endif %}
 
 ─────────────────────────────────────────────────────────────────────────────
 
@@ -41,7 +41,10 @@ Before ANY experimental work, you MUST establish:
    - Who benefits from this research?
    - What's the potential impact?
 
-{% if focused_autoresearch %}2. WHY Pursue the Selected Direction
+{% if focused_managed_ordinary %}2. Why You Expect This Solution to Best Address the Task
+   - Why do you judge this solution most likely to achieve the best outcome within the task's requirements and available resources?
+   - What reasoning and evidence support that judgment, and what evidence challenges it?
+   - What weaknesses, uncertainties, or unexplored possibilities could lead to a better solution?{% elif focused_autoresearch %}2. WHY Pursue the Selected Direction
    - How could it improve the solution to the task?
    - What evidence supports this approach?
    - What assumptions or limitations need investigation?{% else %}2. WHAT Makes It Novel
@@ -55,7 +58,18 @@ Before ANY experimental work, you MUST establish:
    - What will we learn from each experiment?
    - How do results connect to the hypothesis?
 
-{% if focused_autoresearch %}DELIVERABLE: Add a "Motivation & Approach Rationale" section to planning.md:
+{% if focused_managed_ordinary %}DELIVERABLE: Add a "Motivation & Approach Rationale" section to planning.md:
+
+## Motivation & Approach Rationale
+
+### Why This Research Matters
+[2-3 sentences on importance and impact]
+
+### Why You Expect This Solution to Best Address the Task
+[Explain the reasoning and evidence supporting or challenging the proposed solution.]
+
+### Weaknesses and Uncertainties
+[What assumptions, limitations, or unexplored possibilities could lead to a better solution?]{% elif focused_autoresearch %}DELIVERABLE: Add a "Motivation & Approach Rationale" section to planning.md:
 
 ## Motivation & Approach Rationale
 
@@ -93,7 +107,7 @@ AFTER COMPLETING PHASE 0: IMMEDIATELY BEGIN PHASE 1
 ─────────────────────────────────────────────────────────────────────────────
 
 ✓ You have established WHY this research matters
-{% if focused_autoresearch %}✓ You have explained WHY the selected direction is worth investigating{% else %}✓ You have identified WHAT makes it novel{% endif %}
+{% if focused_managed_ordinary %}✓ You have explained the reasoning and evidence behind the proposed solution{% elif focused_autoresearch %}✓ You have explained WHY the selected direction is worth investigating{% else %}✓ You have identified WHAT makes it novel{% endif %}
 
 ✓ NOW proceed to detailed planning
 
@@ -125,7 +139,9 @@ Before writing any code, create a detailed research plan:
 
 4. Experimental Design
    - Choose appropriate methods and tools (justify your choices)
-{% if focused_autoresearch %}   - Use relevant datasets identified in resources.md. Include baseline work
+{% if focused_managed_ordinary %}   - Use relevant datasets identified in resources.md. Include baseline work
+     when it helps develop, improve, or evaluate the solution, or when explicitly
+     required by the user. Reuse an existing baseline where suitable.{% elif focused_autoresearch %}   - Use relevant datasets identified in resources.md. Include baseline work
      only when needed to evaluate the selected direction or when explicitly
      required by the user. Reuse existing baselines where available.{% else %}   - Use datasets and baselines identified in resources.md{% endif %}
 
@@ -179,12 +195,15 @@ Must include:
 ...
 
 ### Baselines
-{% if focused_autoresearch %}[Which baselines, if any, are needed to evaluate or support the selected direction
+{% if focused_managed_ordinary %}[Which baselines, if any, would help develop, improve, or evaluate the solution,
+or are explicitly required by the user? Explain why.]{% elif focused_autoresearch %}[Which baselines, if any, are needed to evaluate or support the selected direction
 or explicitly required by the user? Explain why.]{% else %}[What will you compare against and why?]{% endif %}
 
 
 ### Evaluation Metrics
-{% if focused_autoresearch %}[Use the evaluation requirements in scoring/interface.md.
+{% if focused_managed_ordinary %}[Use the task requirements and approved plan to guide evaluation.
+Explain how the planned checks or experiments will assess the solution's
+correctness, effectiveness, and relevant limitations.]{% elif focused_autoresearch %}[Use the evaluation requirements in scoring/interface.md.
 Explain how the planned experiments address them.]{% else %}[How will you measure success? Why these metrics?]{% endif %}
 
 
@@ -241,7 +260,9 @@ Execute your plan systematically and carefully:
 
 3. Implementation (adapt to your research type)
    ✓ Follow the approach outlined in your research plan
-{% if focused_autoresearch %}   ✓ Implement reference methods or baselines only when needed to evaluate
+{% if focused_managed_ordinary %}   ✓ Implement reference methods or baselines when they help develop, improve,
+     or evaluate the solution, or when explicitly required by the user. Reuse
+     existing implementations where suitable.{% elif focused_autoresearch %}   ✓ Implement reference methods or baselines only when needed to evaluate
      or support the selected direction or when explicitly required by the
      user. Reuse existing implementations where available.{% else %}   ✓ Implement reference methods or baselines first (if applicable){% endif %}
 
@@ -342,7 +363,8 @@ Interpret results rigorously using chain-of-thought reasoning:
    - Look for patterns across different conditions
 
 2. Comparative Analysis
-{% if focused_autoresearch %}   - Compare against baselines only when needed to evaluate or improve
+{% if focused_managed_ordinary %}   - Compare against baselines when doing so helps develop, improve, or evaluate
+     the solution, or when explicitly required by the user.{% elif focused_autoresearch %}   - Compare against baselines only when needed to evaluate or improve
      the selected direction or when explicitly required by the user.{% else %}   - Compare against all baselines{% endif %}
 
    - Use appropriate statistical tests (see domain-specific guidance)
@@ -392,7 +414,8 @@ For each result, ask yourself:
 AFTER COMPLETING PHASE 3: IMMEDIATELY BEGIN PHASE 4
 ─────────────────────────────────────────────────────────────────────────────
 
-{% if focused_autoresearch %}✓ Verify your analysis is complete, using statistical tests where appropriate
+{% if focused_managed_ordinary %}✓ Verify your analysis is complete using the checks appropriate to the task
+  and approved plan.{% elif focused_autoresearch %}✓ Verify your analysis is complete, using statistical tests where appropriate
   and visualizations when they help interpret results or diagnose problems.{% else %}✓ Verify your analysis is complete with statistical tests and visualizations{% endif %}
 
 ✓ NOW PROCEED to documentation - this is the final phase
@@ -413,7 +436,8 @@ Use markdown files for documentation that will be read (easier to navigate).
 
 DELIVERABLE 1: REPORT.md
 
-{% if focused_autoresearch %}This is a comprehensive technical record of the selected directions.
+{% if focused_managed_ordinary %}This is a comprehensive technical record of the solution, the work performed,
+supporting evidence, and limitations. Include these sections:{% elif focused_autoresearch %}This is a comprehensive technical record of the selected directions.
 Include these sections:{% else %}This is the primary research report. Include these sections:{% endif %}
 
 
@@ -436,7 +460,8 @@ Include these sections:{% else %}This is the primary research report. Include th
 
 ## 4. Results
 - Key findings with supporting data and figures
-{% if focused_autoresearch %}- Tables comparing methods, conditions, or systems when they help explain the findings
+{% if focused_managed_ordinary %}- Tables comparing methods, conditions, or systems when they help explain the findings
+- When including visualizations, use clear labels, units, and legends{% elif focused_autoresearch %}- Tables comparing methods, conditions, or systems when they help explain the findings
 - When including visualizations, use clear labels, units, and legends{% else %}- Tables comparing methods, conditions, or systems
 - Visualizations with clear labels, units, and legends{% endif %}
 
@@ -444,7 +469,8 @@ Include these sections:{% else %}This is the primary research report. Include th
 
 ## 5. Analysis & Discussion
 - Interpretation in context of hypothesis
-{% if focused_autoresearch %}- Comparisons to baselines, prior work, or literature values when they
+{% if focused_managed_ordinary %}- Comparisons to baselines, prior work, or literature values when they
+  help evaluate the solution or explain the findings{% elif focused_autoresearch %}- Comparisons to baselines, prior work, or literature values when they
   help explain the findings or guide improvements{% else %}- Comparison to baselines, prior work, or literature values{% endif %}
 
 - Statistical significance and effect sizes where applicable

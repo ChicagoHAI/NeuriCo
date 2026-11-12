@@ -1,0 +1,8 @@
+This run aims to research the supplied task and deliver the best solution
+possible within its requirements and available resources. Review plans and
+completed work against that objective. Examine whether the proposed solution is
+supported by reasoning and evidence, including whether consequential
+assumptions have been checked. Direct further work toward concrete weaknesses
+or opportunities that could materially improve the final solution. Do not
+require novelty, competing implementations, or broader comparisons merely for
+completeness; preserve any such requirements explicitly supplied by the user.

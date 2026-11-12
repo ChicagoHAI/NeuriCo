@@ -173,20 +173,15 @@ class PipelineState:
         recorded_focus = self.state.get("focused_autoresearch")
         if recorded_focus is not None and type(recorded_focus) is not bool:
             raise RuntimeError(
-                "Pipeline state has an invalid focused AutoResearch setting."
+                "Pipeline state has an invalid focused-mode setting."
             )
-        if str(self.state.get("workflow", "")).strip().lower() == "ordinary":
-            if recorded_focus is not None or focused_autoresearch is not None:
-                raise RuntimeError(
-                    "Focused AutoResearch is not valid for an Ordinary research workspace."
-                )
         if focused_autoresearch is not None:
             if type(focused_autoresearch) is not bool:
                 raise TypeError("focused_autoresearch must be a Boolean when supplied.")
             established_focus = bool(recorded_focus) if recorded_focus is not None else False
             if state_existed and focused_autoresearch != established_focus:
                 raise RuntimeError(
-                    "This workspace already has a different focused AutoResearch setting."
+                    "This workspace already has a different focused-mode setting."
                 )
             if not state_existed:
                 self.state["focused_autoresearch"] = focused_autoresearch
@@ -214,13 +209,34 @@ class PipelineState:
         value = payload.get("focused_autoresearch")
         if value is not None and type(value) is not bool:
             raise RuntimeError(
-                "Pipeline state has an invalid focused AutoResearch setting."
-            )
-        if str(payload.get("workflow", "")).strip().lower() == "ordinary" and value is not None:
-            raise RuntimeError(
-                "Ordinary pipeline state cannot contain focused AutoResearch configuration."
+                "Pipeline state has an invalid focused-mode setting."
             )
         return bool(value) if value is not None else False
+
+    @classmethod
+    def read_workflow(cls, work_dir: Path) -> str:
+        """Read the established workflow marker without mutating state."""
+        state_file = Path(work_dir) / ".neurico" / "pipeline_state.json"
+        if not state_file.is_file():
+            return ""
+        try:
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("The workspace pipeline state is unreadable.") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("The workspace pipeline state is invalid.")
+        workflow = str(payload.get("workflow", "")).strip().lower()
+        if workflow not in {"", "ordinary"}:
+            raise RuntimeError("Pipeline state has an invalid workflow marker.")
+        return workflow or "autoresearch"
+
+    @classmethod
+    def read_focused_managed_ordinary(cls, work_dir: Path) -> bool:
+        """Return whether the workspace is focused managed Ordinary research."""
+        return (
+            cls.read_workflow(work_dir) == "ordinary"
+            and cls.read_focused_autoresearch(work_dir)
+        )
 
     @classmethod
     def require_compatible_workflow(cls, work_dir: Path, requested_workflow: str) -> None:
@@ -497,13 +513,17 @@ class ResearchPipelineOrchestrator:
         self.hitl_autoresearch = hitl_autoresearch
         self.baseline_construction = baseline_construction
         self.managed_initial_run = managed_initial_run or hitl_autoresearch or baseline_construction
-        if focused_autoresearch is not None and not hitl_autoresearch:
+        focused_managed_ordinary = bool(
+            managed_initial_run and not hitl_autoresearch and not baseline_construction
+        )
+        focused_workflow = bool(hitl_autoresearch or focused_managed_ordinary)
+        if focused_autoresearch is not None and not focused_workflow:
             raise ValueError(
-                "Focused AutoResearch is valid only for a HITL AutoResearch pipeline."
+                "Focused mode is valid only for managed Ordinary research or HITL AutoResearch."
             )
         state_path = self.work_dir / ".neurico" / "pipeline_state.json"
         focus_request = focused_autoresearch
-        if hitl_autoresearch and not state_path.exists() and focus_request is None:
+        if focused_workflow and not state_path.exists() and focus_request is None:
             focus_request = False
         self.state = PipelineState(
             self.work_dir,
@@ -512,10 +532,13 @@ class ResearchPipelineOrchestrator:
                 if self.managed_initial_run and not self.hitl_autoresearch
                 else None
             ),
-            focused_autoresearch=focus_request if hitl_autoresearch else None,
+            focused_autoresearch=focus_request if focused_workflow else None,
         )
         self.focused_autoresearch = (
-            self.state.focused_autoresearch if hitl_autoresearch else False
+            self.state.focused_autoresearch if focused_workflow else False
+        )
+        self.focused_managed_ordinary = bool(
+            focused_managed_ordinary and self.focused_autoresearch
         )
         self.workspace_mode = self.state.workspace_mode
 
@@ -2151,7 +2174,10 @@ class ResearchPipelineOrchestrator:
                     if planning_requested
                     else None
                 ),
-                focused_autoresearch=self.focused_autoresearch,
+                focused_autoresearch=(
+                    self.focused_autoresearch if self.hitl_autoresearch else False
+                ),
+                focused_managed_ordinary=self.focused_managed_ordinary,
             )
 
         except HitlRunStopRequested:
@@ -2430,10 +2456,13 @@ class ResearchPipelineOrchestrator:
         def apply_focused_scope(prompt: str) -> str:
             if not self.focused_autoresearch:
                 return prompt
+            template_name = (
+                "hitl/focused_managed_ordinary_experiment_runner.txt"
+                if self.focused_managed_ordinary
+                else "hitl/focused_autoresearch_experiment_runner.txt"
+            )
             contract = generator.render_template(
-                generator.load_template(
-                    "hitl/focused_autoresearch_experiment_runner.txt"
-                ),
+                generator.load_template(template_name),
                 {"hitl_phase": hitl_phase},
             ).strip()
             return f"{prompt.rstrip()}\n\n{contract}\n"
@@ -2444,7 +2473,10 @@ class ResearchPipelineOrchestrator:
                 root_dir=self.work_dir,
                 scoring_enabled=scoring_enabled,
                 include_implicit_time_limit=False,
-                focused_autoresearch=self.focused_autoresearch,
+                focused_autoresearch=(
+                    self.focused_autoresearch if self.hitl_autoresearch else False
+                ),
+                focused_managed_ordinary=self.focused_managed_ordinary,
             )
             return apply_focused_scope(
                 generate_instructions(
@@ -2454,7 +2486,11 @@ class ResearchPipelineOrchestrator:
                     domain=idea.get("idea", {}).get("domain", "general"),
                     idea_spec=idea.get("idea", {}),
                     provider=provider,
-                    focused_autoresearch=self.focused_autoresearch,
+                    scoring_enabled=(scoring_enabled and not self.hitl_autoresearch),
+                    focused_autoresearch=(
+                        self.focused_autoresearch if self.hitl_autoresearch else False
+                    ),
+                    focused_managed_ordinary=self.focused_managed_ordinary,
                 )
             )
         if hitl_phase not in {"plan", "review"}:
@@ -2468,7 +2504,7 @@ class ResearchPipelineOrchestrator:
                     "idea_json": json.dumps(idea, indent=2, default=str),
                     "scoring_interface": (
                         interface_path.read_text(encoding="utf-8")
-                        if interface_path.is_file()
+                        if scoring_enabled and interface_path.is_file()
                         else ""
                     ),
                 },
