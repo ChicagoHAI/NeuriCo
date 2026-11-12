@@ -997,6 +997,7 @@ class ResearchRunner:
             # run backend after recovery and before the manager starts.
             select_hitl_manager_provider(work_dir, provider)
             runtime_state = HitlRuntimeState(work_dir)
+            runtime_state.bind_task_context(idea, prepare_run=not preserve_initial_inputs)
             guard_scope = runtime_state.workspace_guard_scope()
             runtime_state.set_workspace_guard_scope(
                 runtime_private_roots=guard_scope["runtime_private_roots"],

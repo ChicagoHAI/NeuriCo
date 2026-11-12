@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1334,8 +1335,9 @@ def test_restored_agent_boundary_relaunches_recorded_decision_without_refresh(
     assert state.snapshot()["next_autoresearch_action"]["status"] == "resolved"
 
 
+@pytest.mark.parametrize("task_case", ["legacy", "bound", "interrupted", "legacy_cleanup", "legacy_dict"])
 def test_budget_exhaustion_rolls_back_unfinished_proposal_preparation(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, task_case
 ):
     baseline = tmp_path / "baseline.txt"
     baseline.write_text("selected frontier\n", encoding="utf-8")
@@ -1440,6 +1442,43 @@ def test_budget_exhaustion_rolls_back_unfinished_proposal_preparation(
     baseline.write_text("partial resource changes\n", encoding="utf-8")
     (tmp_path / "resources.md").write_text("partial resources\n", encoding="utf-8")
 
+    # The recovery snapshot predates the original task-context binding.
+    task = None
+    if task_case == "legacy_dict":
+        task = {"idea": {"title": "Original assignment"}}
+        with state._locked():
+            state._state["task_context"] = task
+            state._save_unlocked()
+        # An old cleanup also stored the task as a JSON dictionary.
+        har._begin_budget_preparation_cleanup(tmp_path, request_id=request_id)
+    elif task_case != "legacy":
+        task = state.bind_task_context(yaml.safe_load("""
+idea:
+  title: Original assignment
+  constraints:
+    deadline: 2026-11-09
+    tags: !!set {alpha: null, beta: null}
+    payload: !!binary aGVsbG8=
+"""))
+    if task_case == "legacy_cleanup":
+        har._begin_budget_preparation_cleanup(tmp_path, request_id=request_id)
+        stop = json.loads(stop_path.read_text(encoding="utf-8"))
+        del stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["task_context"]
+        stop_path.write_text(json.dumps(stop), encoding="utf-8")
+    if task_case == "interrupted":
+        restore = HitlGitStateStore.restore
+
+        def interrupt_after_restore(store, snapshot):
+            restore(store, snapshot)
+            assert state.task_context() is None
+            raise RuntimeError("interrupted after private restore")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(HitlGitStateStore, "restore", interrupt_after_restore)
+            with pytest.raises(RuntimeError, match="interrupted after private restore"):
+                har.finalize_budget_exhausted_autoresearch(tmp_path, request_id=request_id)
+        assert state.task_context() is None
+
     result = har.finalize_budget_exhausted_autoresearch(
         tmp_path, request_id=request_id
     )
@@ -1457,6 +1496,13 @@ def test_budget_exhaustion_rolls_back_unfinished_proposal_preparation(
     cleanup = stop[har._BUDGET_PREPARATION_CLEANUP_KEY]
     assert cleanup["status"] == "completed"
     assert cleanup["proposal_artifact_snapshot_id"] == prepared_snapshot_id
+    if task_case not in {"legacy", "legacy_dict"}:
+        assert isinstance(cleanup["task_context"], str)
+        assert yaml.safe_load(cleanup["task_context"]) == task
+    assert HitlRuntimeState(tmp_path).task_context() == task
+    # Completed finalization is also replayable without losing context.
+    har.finalize_budget_exhausted_autoresearch(tmp_path, request_id=request_id)
+    assert HitlRuntimeState(tmp_path).task_context() == task
 
 
 def test_recovered_approval_uses_its_recorded_workspace_scope(tmp_path):
@@ -1638,6 +1684,8 @@ def test_preparation_without_candidate_marker_reaches_iteration_loop(tmp_path):
 
     controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
     controller.hitl_runtime = FakeRuntime()
+    controller.work_dir = tmp_path
+    controller._task_context = state.bind_task_context({"idea": {"title": "Task"}})
 
     assert controller._resume_frontier_boundary_if_needed() is None
 

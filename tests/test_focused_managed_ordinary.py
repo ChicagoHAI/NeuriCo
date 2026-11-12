@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -221,6 +222,78 @@ def test_resource_finder_uses_distinct_bootstrap_and_additional_contracts():
     assert "established managed research workspace" in additional
     assert "DIRECTION BUDGET" not in bootstrap
     assert "DIRECTION BUDGET" not in additional
+
+
+@pytest.mark.parametrize("focused", [False, True])
+def test_additive_collaborative_discussion_keeps_planning_constraints(focused):
+    prompt = PromptGenerator(ROOT / "templates").generate_resource_finder_prompt(
+        IDEA,
+        hitl_runtime_completion=True,
+        hitl_phase="discussion",
+        invocation_mode="additive",
+        focused_autoresearch=focused,
+    )
+    assert "ADDITIVE INVOCATION — PLANNING CONSTRAINTS" in prompt
+    assert "RESOURCE-FINDER DIRECTION LIMIT" in prompt
+    assert "ADDITIVE INVOCATION — EXISTING WORKSPACE IS AUTHORITATIVE" not in prompt
+    assert "FOCUSED MANAGED ORDINARY RESEARCH" not in prompt
+    assert ("FOCUSED HITL AUTORESEARCH SCOPE" in prompt) == focused
+
+
+@pytest.mark.parametrize("phase", ["plan", "execution", "review"])
+def test_resource_description_is_scoped_and_preserves_existing_context(phase):
+    generator = PromptGenerator(ROOT / "templates")
+    idea = deepcopy(IDEA)
+    idea["idea"]["background"] = {"context": "Existing background context."}
+    kwargs = {"hitl_runtime_completion": True, "hitl_phase": phase}
+    without_description = generator.generate_resource_finder_prompt(
+        idea, focused_managed_ordinary=True, **kwargs
+    )
+    assert "User-Provided Instructions and Context" not in without_description
+
+    idea["idea"]["background"]["description"] = ""
+    assert generator.generate_resource_finder_prompt(
+        idea, focused_managed_ordinary=True, **kwargs
+    ) == without_description
+    legacy_prompts = {
+        focused: generator.generate_resource_finder_prompt(
+            idea, focused_autoresearch=focused, **kwargs
+        )
+        for focused in (False, True)
+    }
+    idea["idea"]["background"]["description"] = "Full task instructions."
+    prompt = generator.generate_resource_finder_prompt(
+        idea, focused_managed_ordinary=True, **kwargs
+    )
+    assert "Full task instructions." in prompt
+    assert "Existing background context." in prompt
+    for focused, legacy_prompt in legacy_prompts.items():
+        assert generator.generate_resource_finder_prompt(
+            idea, focused_autoresearch=focused, **kwargs
+        ) == legacy_prompt
+
+
+@pytest.mark.parametrize("phase", ["plan", "execution", "review"])
+def test_resource_finder_receives_complete_description_with_short_hypothesis(phase):
+    generator = PromptGenerator(ROOT / "templates")
+    idea = deepcopy(IDEA)
+    instruction = (
+        "Investigate the supplied data.\n\n"
+        + "Check the assumptions and validate the analysis. " * 40
+        + "\nRequired output: /app/final.json\n  Preserve this indentation.\n"
+    )
+    idea["idea"]["hypothesis"] = instruction[:200]
+    idea["idea"]["background"] = {"description": instruction}
+    prompt = generator.generate_resource_finder_prompt(
+        idea,
+        provider="codex",
+        hitl_runtime_completion=True,
+        hitl_phase=phase,
+        focused_managed_ordinary=True,
+    )
+    assert "Required output" not in idea["idea"]["hypothesis"]
+    assert prompt.count(instruction) == 1
+    assert generator._extract_user_instructions(prompt) == instruction.strip()
 
 
 def test_manager_phase_review_receives_focused_ordinary_context(tmp_path):

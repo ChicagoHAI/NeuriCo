@@ -68,6 +68,16 @@ def workspace_for_idea(project_root: Path, idea_id: str) -> Path:
     return workspace
 
 
+def initialize_manager_task(project_root: Path, idea_id: str, work_dir: Path) -> None:
+    """Supply pre-Start manager context without refreshing an existing binding."""
+    from core.hitl_runtime_state import HitlRuntimeState
+
+    idea = IdeaManager(resolve_ideas_dir(Path(project_root))).get_idea(idea_id)
+    if idea is None:
+        raise ValueError(f"Idea not found: {idea_id}")
+    HitlRuntimeState(work_dir).bind_task_context(idea)
+
+
 class HitlRunController:
     """Launch and report one workspace-owned managed research run at a time."""
 

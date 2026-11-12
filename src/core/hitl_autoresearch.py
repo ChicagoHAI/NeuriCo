@@ -896,6 +896,8 @@ def construct_managed_baseline(
     selected_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     runtime_state = HitlRuntimeState(work_dir)
 
+    task_context = runtime_state.bind_task_context(idea)
+
     def restore_active_rule_maker_boundary() -> None:
         """Restore the inner managed-stage boundary before the outer workspace."""
         ResearchPipelineOrchestrator(
@@ -905,6 +907,7 @@ def construct_managed_baseline(
             baseline_construction=True,
             hitl_mode=selected_mode,
         ).restore_stopped_initial_run()
+        runtime_state.bind_task_context(task_context)
 
     existing_publication = runtime_state.initial_root_publication_transition()
     if isinstance(existing_publication, dict):
@@ -1524,12 +1527,14 @@ def _validate_budget_preparation_cleanup(value: Any) -> Dict[str, Any]:
     parent = str(value.get("parent_node_sha", "")).strip()
     action_status = str(value.get("action_status", "")).strip()
     recovery = value.get("recovery")
+    task_context = value.get("task_context")
     prepared_artifacts = value.get("proposal_artifact_snapshot_id")
     if (
         status not in _BUDGET_PREPARATION_CLEANUP_STATUSES
         or not parent
         or action_status not in {"pending", "decision_recorded", "resolved", "cancelled"}
         or (recovery is not None and not isinstance(recovery, dict))
+        or (task_context is not None and not isinstance(task_context, (str, dict)))
         or (
             prepared_artifacts is not None
             and (
@@ -1552,7 +1557,18 @@ def _begin_budget_preparation_cleanup(
     stop = _read_budget_exhausted_stop(work_dir, request_id)
     existing = stop.get(_BUDGET_PREPARATION_CLEANUP_KEY)
     if existing is not None:
-        return _validate_budget_preparation_cleanup(existing)
+        cleanup = _validate_budget_preparation_cleanup(existing)
+        # Upgrade an older pending cleanup before its restore can erase the task.
+        task_context = HitlRuntimeState(work_dir).snapshot().get("task_context")
+        if (
+            cleanup["status"] == "prepared"
+            and "task_context" not in cleanup
+            and task_context is not None
+        ):
+            cleanup["task_context"] = task_context
+            stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
+            atomic_write_json(path, stop, ensure_ascii=True, indent=2)
+        return cleanup
 
     action = HitlRuntimeState(work_dir).snapshot().get("next_autoresearch_action")
     if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
@@ -1572,6 +1588,7 @@ def _begin_budget_preparation_cleanup(
             raise RuntimeError("Proposal preparation has invalid recovery state.")
         HitlStageRollback.from_descriptor(work_dir, recovery)
 
+    task_context = HitlRuntimeState(work_dir).snapshot().get("task_context")
     cleanup = {
         "version": 1,
         "status": "prepared",
@@ -1587,6 +1604,7 @@ def _begin_budget_preparation_cleanup(
             else {}
         ),
         **({"recovery": dict(recovery)} if isinstance(recovery, dict) else {}),
+        **({"task_context": task_context} if task_context is not None else {}),
     }
     stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
     atomic_write_json(path, stop, ensure_ascii=True, indent=2)
@@ -1642,6 +1660,12 @@ def _finalize_budget_exhausted_preparation(
                 clean_untracked_public=True,
             )
             rollback.state_store.restore(rollback.hitl_snapshot)
+
+        # The durable cleanup retains the task even if interrupted after restore.
+        if cleanup.get("task_context") is not None:
+            HitlRuntimeState(work_dir).bind_task_context(
+                HitlRuntimeState.decode_task_context(cleanup["task_context"])
+            )
 
         request_key = HitlRuntimeState(
             work_dir
@@ -3080,7 +3104,9 @@ def continue_hitl_autoresearch(
     from core.hitl_runtime_state import HitlRuntimeState
 
     runtime_state = HitlRuntimeState(work_dir)
+    task_context = runtime_state.task_context() or idea
     recovery = recovered_attempt or recover_interrupted_hitl_attempt_if_needed(work_dir)
+    task_context = runtime_state.bind_task_context(task_context)
     selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     selected_proposal_mode = normalize_proposal_mode_config(proposal_mode_config)
     selected_planning_mode = normalize_planning_mode_config(planning_mode_config)
@@ -3143,6 +3169,7 @@ def continue_hitl_autoresearch(
     else:
         current_sha = selected_sha or checkpoints.current_sha()
 
+    runtime_state.bind_task_context(task_context)
     if iterations == 0 and (
         pending_worker_request
         or pending_frontier_transition
@@ -3251,11 +3278,14 @@ class HitlAutoResearchController:
         self.idea = idea
         self.idea_id = idea_id
         self.work_dir = Path(work_dir)
+        self._task_context = HitlRuntimeState(self.work_dir).bind_task_context(idea)
         self.checkpoints = checkpoint_manager or CheckpointManager(self.work_dir)
         self.history = history_manager or AttemptHistoryManager(history_root, idea_id)
         self.proposal_generator = proposal_generator
         self.scorer = scorer
         self.hitl_runtime = hitl_runtime
+        if self.hitl_runtime is not None:
+            self.hitl_runtime._restore_task_context = self._restore_task_context
         # Rollback replaces attempt-local runtime wrappers, not the run-owned
         # manager and channel that were injected by the launcher.
         self._hitl_run_binding = (
@@ -8418,6 +8448,7 @@ class HitlAutoResearchController:
         return build
 
     def _proposal_hitl_runtime(self) -> HitlRuntime:
+        self._restore_task_context()
         if self.hitl_runtime is None:
             binding = getattr(self, "_hitl_run_binding", None)
             self.hitl_runtime = HitlRuntime(
@@ -8427,11 +8458,18 @@ class HitlAutoResearchController:
                 channel=binding[1] if binding is not None else None,
                 use_hitl_autoresearch_whiteboard=True,
                 hitl_mode=self.hitl_mode,
+                restore_task_context=self._restore_task_context,
             )
         return self.hitl_runtime
 
+    def _restore_task_context(self) -> None:
+        self._task_context = HitlRuntimeState(self.work_dir).bind_task_context(
+            self._task_context
+        )
+
     def _reload_manager_after_hitl_restore(self) -> None:
         """Remove failed-attempt context from a surviving manager instance."""
+        self._restore_task_context()
         if self.hitl_runtime is not None:
             reloader = getattr(self.hitl_runtime, "reload_manager_after_state_restore", None)
             if callable(reloader):
@@ -8788,6 +8826,7 @@ def run_hitl_autoresearch_loop(
             idea=idea,
         )
 
+    HitlRuntimeState(work_dir).bind_task_context(idea)
     experiment_runtime = HitlRuntime(
         work_dir,
         "experiment_runner",

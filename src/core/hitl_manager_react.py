@@ -18,6 +18,7 @@ import queue
 import secrets
 import sys
 import threading
+import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -2963,6 +2964,13 @@ class HitlManager:
         self.world_model.reconcile(self.research)
         research_state = self.research.digest_section()
         conversation_prefix = "Chronological manager conversation:\n"
+        task = self.runtime_state.task_context()
+        task_message = (
+            "User-provided research task (supplied by the runtime):\n\n"
+            + yaml.safe_dump(task, sort_keys=True, allow_unicode=True)
+            if task is not None
+            else "The runtime has no saved user-provided task context for this workspace."
+        )
         messages = [
             {
                 "role": "system",
@@ -2975,6 +2983,7 @@ class HitlManager:
                 "role": "system",
                 "content": self._runtime_tool_boundary_instruction(tools),
             },
+            {"role": "user", "content": task_message},
             {
                 "role": "user",
                 "content": (

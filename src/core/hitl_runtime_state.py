@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
+import yaml
+
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
 from core.hitl_planning_mode import (
@@ -353,6 +355,7 @@ class HitlRuntimeState:
     @staticmethod
     def _default() -> Dict[str, Any]:
         return {
+            "task_context": None,
             "manager_provider": "",
             "worker_continuation": None,
             "pending_worker_command": None,
@@ -568,6 +571,48 @@ class HitlRuntimeState:
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             return self._copy(self._state)
+
+    def task_context(self) -> Optional[Dict[str, Any]]:
+        """Return the complete runtime-bound task, independently of research history."""
+        return self.decode_task_context(self.snapshot().get("task_context"))
+
+    @staticmethod
+    def decode_task_context(saved: Any) -> Optional[Dict[str, Any]]:
+        """Read YAML text or the JSON dictionary stored by older runtimes."""
+        if saved is None:
+            return None
+        task = yaml.safe_load(saved) if isinstance(saved, str) else HitlRuntimeState._copy(saved)
+        if not isinstance(task, dict):
+            raise HitlRuntimeStateError("Saved task context must contain an idea mapping.")
+        return task
+
+    def bind_task_context(
+        self, idea: Dict[str, Any], *, prepare_run: bool = False
+    ) -> Dict[str, Any]:
+        """Initialize context, or refresh it at run preparation unless review is held.
+
+        Nested workers and recovery use the default initialize-only behavior.
+        The returned copy is the binding the owning workflow must retain across
+        rollback, which may differ from its newly loaded idea on resume.
+        """
+        from core.compute_backend import without_runtime_compute_backend
+        from core.local_resources import manager_task_copy
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            saved = self._state.get("task_context")
+            held = (
+                worker_command_requires_resume(self._state.get("pending_worker_command"))
+                or bool(self._state.get("worker_continuation"))
+                or bool(self._state.get("next_autoresearch_action"))
+                or bool(self._state.get("frontier_decision_transition"))
+            )
+            if saved is None or (prepare_run and not held):
+                saved = manager_task_copy(self.work_dir, without_runtime_compute_backend(idea))
+                saved = yaml.safe_dump(saved, sort_keys=False, allow_unicode=True)
+                self._state["task_context"] = saved
+                self._save_unlocked()
+            return self.decode_task_context(saved)
 
     def manager_provider(self) -> str:
         """Return the workspace's selected manager backend, if configured."""
