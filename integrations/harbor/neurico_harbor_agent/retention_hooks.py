@@ -18,8 +18,8 @@ from core.hitl_git import run_git
 from core.hitl_manager_history import HitlManagerHistory
 from core.trace_retention import set_trace_recorder
 
-from .artifacts import TraceRedactor, _is_credential_path
-from .internal_traces import InternalTraceArchive, _RESEARCH_ROOTS
+from .artifacts import _is_credential_path
+from .internal_traces import InternalTraceArchive, _RESEARCH_ROOTS, private_trace_redactor
 
 
 TRACE_DIRECTORY_ENV = "NEURICO_RESEARCH_TRACE_DIR"
@@ -139,6 +139,6 @@ def install_retention_hooks() -> None:
     if not directory.is_absolute() or not directory.is_dir():
         raise ValueError("The parent must create the private trace directory before launch")
     credential = Path(os.environ["CODEX_HOME"]) / "auth.json"
-    redactor = TraceRedactor.from_sources(os.environ,
+    redactor = private_trace_redactor(os.environ,
         credential_file=credential if credential.is_file() else None)
     set_trace_recorder(HarborRetentionHooks(InternalTraceArchive(directory, redactor)))

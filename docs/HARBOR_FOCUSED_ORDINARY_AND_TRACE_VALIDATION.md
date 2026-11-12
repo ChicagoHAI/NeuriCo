@@ -147,3 +147,24 @@ compares enabled, disabled and failing retention, including exact provider
 inputs/arguments, returns, cancellation/rollback order and restored state.
 `git diff --check` passed. No model calls were made. Linux and live pilot coverage
 remain checkpoint 8; retained source presence is not yet end-to-end validation.
+
+## Linux validation and first Harbor fixture findings
+
+The committed implementation passed **141 Linux checks** in a local ARM64
+container, including all seven process-supervision cases skipped on macOS.
+Two existing rapid-write test fixtures needed explicit timestamp advancement:
+the container filesystem can give immediate same-size rewrites identical
+mtime/ctime values. Production snapshot behavior was not changed.
+
+Actual no-model Harbor execution exposed a private evidence issue: Harbor passes
+`HARBOR_ACP_AUTH_POLICY=auto`, and the existing public sanitizer treats this enum
+value as an exact credential. The private archive now excludes only the three
+known values of that specific policy field when constructing its redactor.
+Actual credential fields still take precedence, including a credential literally
+containing `auto`. Public sanitization is unchanged. A regression covers both.
+
+Harbor's unpinned ACP runner bootstrap also installed an incompatible newer
+client (`text_block` import failure before NeuriCo). Validation uses a separate
+local copy of Harbor 0.25.0 with a one-line ACP 0.12.1 pin, recorded in gapbench;
+the shared runtime remains untouched. Full fixture and pilot outcomes follow
+when completed. No model calls have been made at this point.

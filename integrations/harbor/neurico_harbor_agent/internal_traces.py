@@ -35,6 +35,16 @@ _RESEARCH_ROOTS = {
 }
 
 
+def private_trace_redactor(environment, *, credential_file=None, additional_values=()):
+    # Harbor's authentication policy is an enum, not an authentication secret.
+    # Treating "auto" as a secret destroys ordinary task/prompt words in evidence.
+    values = dict(environment)
+    if values.get("HARBOR_ACP_AUTH_POLICY") in {"auto", "explicit", "disabled"}:
+        values.pop("HARBOR_ACP_AUTH_POLICY")
+    return TraceRedactor.from_sources(values, credential_file=credential_file,
+                                      additional_values=additional_values)
+
+
 class InternalTraceArchive:
     """One persistent private directory; failed collection never resets it."""
 

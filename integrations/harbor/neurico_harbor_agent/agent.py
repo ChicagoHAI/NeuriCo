@@ -69,7 +69,7 @@ from .scratch import (
     PrivateOutputSpool,
 )
 from .codex_bootstrap import CODEX_VERSION
-from .internal_traces import DEFAULT_INTERNAL_TRACE_ROOT, InternalTraceArchive
+from .internal_traces import private_trace_redactor, DEFAULT_INTERNAL_TRACE_ROOT, InternalTraceArchive
 
 ContentBlock = (
     TextContentBlock
@@ -499,7 +499,7 @@ async def run_autoresearch_process(
     internal_archive: InternalTraceArchive | None = None
     if preserve_internal:
         try:
-            private_redactor = TraceRedactor.from_sources(
+            private_redactor = private_trace_redactor(
                 base_environment, credential_file=connection.auth_file,
                 additional_values=(connection.token,),
             )

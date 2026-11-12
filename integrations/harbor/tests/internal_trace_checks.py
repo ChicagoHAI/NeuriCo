@@ -314,3 +314,14 @@ def test_error_paths_stop_and_collect_before_removing_control_sources(tmp_path, 
     assert manifest["finalized"] is True
     if failure != "spawn":
         assert (archive / "streams/stdout-stderr.log").read_text() == "available before failure\n"
+
+
+def test_private_retention_does_not_treat_harbor_auth_policy_as_credential():
+    from neurico_harbor_agent.internal_traces import private_trace_redactor
+    environment = {"HARBOR_ACP_AUTH_POLICY": "auto", "OPENAI_API_KEY": "test-secret-value"}
+    private = private_trace_redactor(environment)
+    assert private.sanitize("autoresearch test-secret-value") == "autoresearch [REDACTED_CONFIGURED_SECRET]"
+    # The existing public exporter contract remains unchanged.
+    assert "autoresearch" not in TraceRedactor.from_sources(environment).sanitize("autoresearch")
+    # A real credential with the same literal value must still be redacted.
+    assert private_trace_redactor({**environment, "OPENAI_API_KEY": "auto"}).sanitize("auto").startswith("[REDACTED")

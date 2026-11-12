@@ -1285,6 +1285,9 @@ def test_changed_binary_output_is_withheld_but_makes_coverage_partial(tmp_path: 
     binary.write_bytes(b"initial-binary")
     baseline = capture_workspace_baseline(workspace)
     binary.write_bytes(b"changed-binary")
+    # Immediate same-size writes can share timestamps on container filesystems.
+    current = binary.stat()
+    os.utime(binary, ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000_000))
 
     artifact_dir = tmp_path / "artifacts"
     snapshot = capture_workspace_snapshot(
@@ -1499,6 +1502,8 @@ def test_workspace_baseline_detects_same_size_edit_with_restored_mtime(tmp_path:
     log_file.write_text("original-public-log\n", encoding="utf-8")
     original_stat = log_file.stat()
     baseline = capture_workspace_baseline(workspace)
+    # Allow ctime to advance on filesystems with coarse update granularity.
+    time.sleep(0.01)
     log_file.write_text("modified-public-log\n", encoding="utf-8")
     os.utime(log_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
 
