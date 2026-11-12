@@ -624,3 +624,15 @@ completed diffs. No pushes or PR creation are included in this plan.
 
 The implementation is complete when these operational and retention checks pass,
 not when NeuriCo achieves a particular benchmark score.
+
+
+## Validation amendment: Harbor cancellation forwarding (2026-11-12)
+
+The real Docker timeout fixture exposed a host/ACP boundary that native NeuriCo
+cancellation tests do not exercise. The user authorized a narrow Harbor 0.25.0
+compatibility patch: forward host cancellation through ACP `session/cancel`,
+await the existing prompt/finalization boundary before log collection, and retain
+the official timeout outcome. Keep the patch and focused checks in gapbench,
+alongside its existing runtime compatibility patches. Use a separate validation
+runtime; do not alter the shared installation or NeuriCo's workflow. Verify the
+same no-model lifecycle matrix after the patch before the live pilot.

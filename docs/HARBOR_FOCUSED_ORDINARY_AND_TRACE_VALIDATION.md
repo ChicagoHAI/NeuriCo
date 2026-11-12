@@ -168,3 +168,43 @@ client (`text_block` import failure before NeuriCo). Validation uses a separate
 local copy of Harbor 0.25.0 with a one-line ACP 0.12.1 pin, recorded in gapbench;
 the shared runtime remains untouched. Full fixture and pilot outcomes follow
 when completed. No model calls have been made at this point.
+
+
+## Real Harbor lifecycle fixtures
+
+Final Linux suite: **142 passed**, including all seven process-supervision cases.
+Actual Harbor 0.25.0 Docker runs using the no-model research substitute produced:
+
+| Fixture | Official outcome | Private archive after cleanup |
+| --- | --- | --- |
+| Success | Reward 1 | Complete, 19 indexed files |
+| Child failure | Execution error, reward 0 | Complete, 18 indexed files |
+| Public export failure | Reward 1 | Complete, 19 indexed files |
+| Harbor hard timeout | Timeout, reward 0 | Incomplete: invocation files survived; final archive absent |
+
+All three completed inventories were checked byte-for-byte against hashes and
+sizes; binary output and two invocation records survived. The timeout reproduces
+Harbor failing to forward host cancellation to the ACP session, then collecting
+logs/deleting the container before NeuriCo's final collection. The user approved
+a narrow Harbor-side compatibility fix, maintained in gapbench; real verification
+is in progress. No model calls have been made and the integration is not yet
+complete.
+
+The reproducible Linux image and no-model fixture runner are under
+`integrations/harbor/tests/`. Build the image from a clean source export:
+
+```sh
+docker build -f integrations/harbor/tests/Dockerfile.validation \
+  -t neurico-harbor-validation:local .
+docker run --rm neurico-harbor-validation:local
+integrations/harbor/.venv/bin/python integrations/harbor/tests/check_harbor_lifecycle.py \
+  --harbor /path/to/compatible/harbor --output /tmp/new-harbor-validation-directory
+```
+
+The fixture runner exports committed source into a temporary repository and
+substitutes only its research entrypoint. It uses dummy credentials and performs
+no inference. Its loopback HTTPS server lets Harbor stage the exact unpushed
+commit without changing Git's transport restrictions or global TLS settings.
+Actual provider settings in these fixtures are synthetic; the separate live
+pilot must validate genuine provider records. The fixture runner intentionally
+fails if any archive is incomplete, including the reproduced timeout case.
