@@ -136,9 +136,9 @@ for human input.
 - JSON and JSONL are redacted structurally. Free-form text and YAML-like
   assignments redact common prefixed credential names such as
   `OPENAI_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `client_secret`, `apiKey`,
-  `apikey`, `accessToken`, `accesstoken`, `clientsecret`, and `private_key`,
-  together with configured environment
-  credential values,
+  `apikey`, `openaiapikey`, `openai_apikey`, `apikey_primary`, `accessToken`,
+  `accesstoken`, `clientsecret`, and `private_key`, together with configured
+  environment credential values,
   credential-bearing URIs, JSON Web Tokens, bearer tokens, nested sensitive
   blocks, raw private-key blocks, and recognizable provider tokens. Direnv
   sources and caches (`.envrc` and `.direnv/`) are never artifact sources.
@@ -146,6 +146,9 @@ for human input.
   sensitive excluded paths inside otherwise-public traces are redacted by the
   same eligibility policy. If detectable credential material remains after
   sanitization, the whole file is withheld and collection is marked partial.
+  Token metadata remains public only when every separated field-name component
+  is a recognized metric descriptor; a credential compound takes precedence
+  over metadata descriptors.
   Configured credentials of at least
   four characters are redacted exactly even without a recognizable provider
   prefix. A shorter configured credential makes trace preparation fail closed

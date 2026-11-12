@@ -278,6 +278,31 @@ def test_trace_redactor_covers_unlabelled_secret_forms() -> None:
             ".log",
             "opaque-compact-private-value",
         ),
+        (
+            '{"openaiapikey":"opaque-prefixed-api-value"}\n',
+            ".json",
+            "opaque-prefixed-api-value",
+        ),
+        (
+            "openai_apikey=opaque-prefixed-token-value\n",
+            ".log",
+            "opaque-prefixed-token-value",
+        ),
+        (
+            "apikey_primary: opaque-suffixed-api-value\n",
+            ".yaml",
+            "opaque-suffixed-api-value",
+        ),
+        (
+            '{"openaiApiKeyCount":"opaque-credential-metadata-value"}\n',
+            ".json",
+            "opaque-credential-metadata-value",
+        ),
+        (
+            '{"github_token_count":"opaque-prefixed-token-count-value"}\n',
+            ".json",
+            "opaque-prefixed-token-count-value",
+        ),
     ],
 )
 def test_trace_redactor_covers_common_sensitive_field_styles(
@@ -297,8 +322,12 @@ def test_trace_redactor_covers_common_sensitive_field_styles(
     assert "REDACTED_SECRET_FIELD" in rendered
 
 
-def test_token_metadata_fields_remain_public() -> None:
-    payload = '{"tokenCount":17,"tokenBudget":100,"tokencount":23}\n'
+def test_harmless_metadata_fields_remain_public() -> None:
+    payload = (
+        '{"tokenCount":17,"tokenBudget":100,"tokencount":23,'
+        '"api_request_count":29,"monkeyCount":31,"secretary_count":37,'
+        '"input_tokens_used":41}\n'
+    )
     safe_payload = artifacts_module._safe_text_payload(
         payload.encode("utf-8"),
         ".json",
@@ -307,7 +336,15 @@ def test_token_metadata_fields_remain_public() -> None:
 
     assert safe_payload is not None
     rendered = json.loads(safe_payload[0])
-    assert rendered == {"tokenBudget": 100, "tokenCount": 17, "tokencount": 23}
+    assert rendered == {
+        "api_request_count": 29,
+        "input_tokens_used": 41,
+        "monkeyCount": 31,
+        "secretary_count": 37,
+        "tokenBudget": 100,
+        "tokenCount": 17,
+        "tokencount": 23,
+    }
 
 
 def test_trace_redactor_covers_short_configured_secrets_and_fails_closed_below_limit() -> None:

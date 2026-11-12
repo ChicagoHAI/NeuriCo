@@ -55,7 +55,26 @@ _SENSITIVE_FIELD_TOKEN_PAIRS = frozenset(
         ("session", "token"),
     }
 )
-_SENSITIVE_COMPACT_FIELD_NAMES = frozenset("".join(parts) for parts in _SENSITIVE_FIELD_TOKEN_PAIRS)
+_SENSITIVE_FIELD_COMPOUNDS = frozenset("".join(parts) for parts in _SENSITIVE_FIELD_TOKEN_PAIRS)
+_TOKEN_FIELD_TOKENS = frozenset({"token", "tokens"})
+_NON_SECRET_TOKEN_METADATA_DESCRIPTORS = frozenset(
+    {
+        "budget",
+        "completion",
+        "count",
+        "estimated",
+        "input",
+        "limit",
+        "max",
+        "min",
+        "output",
+        "prompt",
+        "remaining",
+        "total",
+        "usage",
+        "used",
+    }
+)
 _LINE_ASSIGNMENT = re.compile(
     r"^(?P<prefix>[ \t]*(?:-[ \t]*)?(?P<quote>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)"
     r"(?P=quote)[ \t]*[:=][ \t]*)(?P<value>[^\r\n]*)(?P<newline>\r?\n|$)"
@@ -651,7 +670,8 @@ def _is_sensitive_field_name(field_name: str) -> bool:
     if not tokens:
         return False
     token_set = set(tokens)
-    if len(tokens) == 1 and tokens[0] in _SENSITIVE_COMPACT_FIELD_NAMES:
+    normalized_field_name = "".join(tokens)
+    if any(compound in normalized_field_name for compound in _SENSITIVE_FIELD_COMPOUNDS):
         return True
     if token_set & {"authorization", "cookie", "credential", "credentials", "password", "passwd"}:
         return True
@@ -659,27 +679,9 @@ def _is_sensitive_field_name(field_name: str) -> bool:
         return True
     if "auth" in token_set or tokens == ("dsn",) or tokens == ("key",) or tokens == ("pat",):
         return True
-    adjacent_pairs = set(zip(tokens, tokens[1:]))
-    if adjacent_pairs & _SENSITIVE_FIELD_TOKEN_PAIRS:
-        return True
-    if "token" in token_set or "tokens" in token_set:
-        non_secret_token_metadata = {
-            "budget",
-            "completion",
-            "count",
-            "estimated",
-            "input",
-            "limit",
-            "max",
-            "min",
-            "output",
-            "prompt",
-            "remaining",
-            "total",
-            "usage",
-            "used",
-        }
-        return not bool(token_set & non_secret_token_metadata)
+    if token_set & _TOKEN_FIELD_TOKENS:
+        metadata_tokens = token_set - _TOKEN_FIELD_TOKENS
+        return not (metadata_tokens and metadata_tokens <= _NON_SECRET_TOKEN_METADATA_DESCRIPTORS)
     if tokens[-1] == "key" and token_set & {"access", "api", "private"}:
         return True
     return False
