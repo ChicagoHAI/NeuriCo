@@ -72,3 +72,34 @@ Result: **98 passed, 7 Linux-only skipped**. Checks include actual native manage
 command/environment construction, native worker model/environment construction,
 authentication source immutability, optional/default effort and invalid values.
 `git diff --check` passed.
+
+## Checkpoint 4: collect existing records before cleanup
+
+Added opt-in private collection in the existing parent supervisor. Temporary
+idea/provider directories now survive stop, drain and collection, including
+error paths. Public-store/public-export failure cannot skip private collection.
+The existing spool can retain the complete stream when enabled and exports it
+directly through the existing sanitizer (incrementally, with multiline state),
+without the scratch prefix limit. Available sanitized output survives later
+stream read failure. The public exporter and default limits remain unchanged.
+
+The archive retains recursive research/state/log records, native provider
+sessions and logs, manager SQLite backups, additional changed outputs including
+binaries, and otherwise unretained scratch records. Credentials are excluded or
+sanitized. SQLite redaction occurs in a standalone backup; FTS indexes are
+rebuilt as needed and copied pages are vacuumed, leaving live history untouched.
+Manifest records include hashes, source families, gaps, observed provider
+settings, lifecycle data, runtime versions and adapter revision.
+
+Validation (2026-11-12): combined adapter suites **116 passed, 7 Linux-only
+skipped**; after adding the interrupted-stream-prefix case, the private suite
+passed **19 tests**. A separate strengthened check exported **65 MiB** of stream
+through the collector and verified its retained length (**1 passed**). Tests
+cover normal/failed child, cancellation, timeout, spawn/output failure, public
+storage/export failure, temporary-source removal, native SQLite readability and
+redaction, binary preservation, scratch truncation/recovery, inventory hashes,
+and retaining prior files when finalization fails. `git diff --check` passed.
+
+This checkpoint verifies final source collection. Invocation coverage and
+retention before destructive rollback/overwrite remain checkpoint 5; complete
+end-to-end evidence is not yet claimed. No model calls were made.

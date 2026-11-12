@@ -33,6 +33,34 @@ also sets NeuriCo's existing worker model override; the manager inherits the
 same isolated Codex configuration. Requested settings are recorded separately
 from observations in provider traces.
 
+## Internal analysis archive (opt-in)
+
+Set `NEURICO_HARBOR_PRESERVE_INTERNAL_TRACES=1` to retain private analysis
+records under `/logs/agent/neurico/<run-id>/`, which Harbor downloads with its
+agent logs. The default is `0`; existing public export rules remain unchanged.
+The archive is private local evidence, not an automatically published bundle.
+
+The parent creates the run directory before launch and collects records after
+the child stops and output drains, before temporary idea/provider homes are
+removed. It retains native provider sessions and logs, the submitted idea,
+NeuriCo logs and private state, manager SQLite history, research documents and
+binary outputs, and the complete available child stream. Auth files and live
+MCP credentials are excluded; retained text is sanitized. SQLite is backed up
+and sanitized in the copy without modifying live history. The manifest records
+file hashes, observed provider settings, lifecycle information, sanitization,
+and explicit omissions. Available records survive finalization failure.
+
+Private collection also runs when public storage or public export fails. Its
+status is separate from the research exit status and official verifier score.
+It does not forward private records into ACP messages. Existing private scratch
+is checked for otherwise unretained records; truncated prefixes are flagged
+unless the complete original source was recovered. No new research deadline,
+retry policy, or workflow stage is introduced by collection.
+
+This integration is still being validated: preservation before rollback and
+full invocation-coverage checks are the next implementation checkpoint. Final
+collection alone cannot recover records already overwritten or restored away.
+
 ## Contract
 
 - The ACP `cwd` becomes the idea's `metadata.local_workspace`. The adapter
@@ -192,7 +220,7 @@ from observations in provider traces.
   duplicated into scratch. Scratch is not mentioned in ACP messages or public
   trace metadata and normally disappears when Harbor destroys the task
   container. Manager history remains in NeuriCo's private `.neurico` state and
-  is not duplicated. Collection is final-state based: a workspace file that a
+  is not duplicated when internal retention is disabled. Default collection is final-state based: a workspace file that a
   worker creates and deletes before the supervised process exits cannot be
   recovered unless its content also appeared in stdout or a durable NeuriCo
   log.

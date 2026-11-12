@@ -26,7 +26,7 @@ import shutil
 import stat
 import subprocess
 import time
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from core.scoring_seal import SEALED_PATHS
@@ -286,6 +286,8 @@ def _contains_recognizable_secret_value(value: str) -> bool:
 
 def _sanitize_sensitive_path_references(content: str, redactor: "TraceRedactor") -> str:
     """Withhold a line when its path reference crosses a sensitive boundary."""
+    if not redactor.redact_sensitive_paths:
+        return content
 
     for match in _PATH_REFERENCE.finditer(content):
         rendered = match.group("path")
@@ -330,6 +332,7 @@ class TraceRedactor:
     """Parent-only exact secrets used by the existing trace sanitizer."""
 
     exact_values: tuple[str, ...] = ()
+    redact_sensitive_paths: bool = True
 
     @classmethod
     def from_sources(
@@ -702,35 +705,41 @@ def _is_sensitive_field_name(field_name: str) -> bool:
 
 
 def _sanitize_free_text(content: str, redactor: TraceRedactor) -> str:
-    sanitized = redactor.sanitize(content)
-    rendered_lines: list[str] = []
+    return "".join(_sanitize_free_text_lines(
+        redactor.sanitize(content).splitlines(keepends=True), redactor
+    ))
+
+
+def _sanitize_free_text_lines(lines: Iterable[str], redactor: TraceRedactor) -> Iterable[str]:
+    """Reuse the text sanitizer incrementally, retaining multiline block state."""
     sensitive_block_indent: int | None = None
     private_key_block = False
-    for line in sanitized.splitlines(keepends=True):
+    for line in lines:
+        line = redactor.sanitize(line)
         newline = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
         if private_key_block:
             if _PRIVATE_KEY_END.search(line):
                 private_key_block = False
-            rendered_lines.append(newline)
+            yield (newline)
             continue
         if sensitive_block_indent is not None:
             if not line.strip():
-                rendered_lines.append(newline)
+                yield (newline)
                 continue
             indentation = len(line) - len(line.lstrip(" \t"))
             if indentation > sensitive_block_indent:
-                rendered_lines.append(newline)
+                yield (newline)
                 continue
             sensitive_block_indent = None
         private_key_begin = _PRIVATE_KEY_BEGIN.search(line)
         if private_key_begin is not None:
-            rendered_lines.append(_REDACTED_PRIVATE_KEY + newline)
+            yield (_REDACTED_PRIVATE_KEY + newline)
             if _PRIVATE_KEY_END.search(line, private_key_begin.end()) is None:
                 private_key_block = True
             continue
         match = _LINE_ASSIGNMENT.match(line)
         if match and _is_sensitive_field_name(match.group("key")):
-            rendered_lines.append(match.group("prefix") + _REDACTED_VALUE + match.group("newline"))
+            yield (match.group("prefix") + _REDACTED_VALUE + match.group("newline"))
             raw_value = match.group("value").strip()
             if not raw_value or raw_value.startswith(("|", ">")):
                 sensitive_block_indent = len(line) - len(line.lstrip(" \t"))
@@ -748,11 +757,11 @@ def _sanitize_free_text(content: str, redactor: TraceRedactor) -> str:
             # Free-form text has no reliable delimiter after an unquoted
             # sensitive value. Redact the remainder rather than preserving a
             # possible token continuation.
-            rendered_lines.append(
+            yield (
                 line[: sensitive_match.start("value")] + _REDACTED_VALUE + newline
             )
             continue
-        rendered_lines.append(
+        yield (
             _sanitize_sensitive_path_references(
                 _JWT.sub(
                     _REDACTED_JWT,
@@ -767,7 +776,6 @@ def _sanitize_free_text(content: str, redactor: TraceRedactor) -> str:
                 redactor,
             )
         )
-    return "".join(rendered_lines)
 
 
 def _sanitize_serializable(

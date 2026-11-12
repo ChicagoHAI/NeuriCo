@@ -69,6 +69,7 @@ from .scratch import (
     PrivateOutputSpool,
 )
 from .codex_bootstrap import CODEX_VERSION
+from .internal_traces import DEFAULT_INTERNAL_TRACE_ROOT, InternalTraceArchive
 
 ContentBlock = (
     TextContentBlock
@@ -134,6 +135,13 @@ def _reasoning_effort(environment: dict[str, str]) -> ReasoningEffort | None:
     if raw is not None and raw not in {"low", "medium", "high", "xhigh"}:
         raise ValueError("NEURICO_HARBOR_REASONING_EFFORT must be low, medium, high, or xhigh")
     return raw
+
+
+def _preserve_internal_traces(environment: dict[str, str]) -> bool:
+    raw = environment.get("NEURICO_HARBOR_PRESERVE_INTERNAL_TRACES", "0")
+    if raw not in {"0", "1"}:
+        raise ValueError("NEURICO_HARBOR_PRESERVE_INTERNAL_TRACES must be 0 or 1")
+    return raw == "1"
 
 
 def _autoresearch_time_limit(environment: dict[str, str]) -> int | None:
@@ -250,6 +258,16 @@ def _prepare_trace_preflight(
     try:
         artifact_store = HarborArtifactStore.open(DEFAULT_HARBOR_ARTIFACT_ROOT)
     except Exception as storage_error:
+        if _preserve_internal_traces(base_environment):
+            # Public storage availability must not gate private source discovery.
+            try:
+                redactor = TraceRedactor.from_sources(
+                    base_environment, credential_file=connection.auth_file,
+                    additional_values=(connection.token,),
+                )
+                baseline = capture_workspace_baseline(workspace, redactor=redactor)
+            except Exception:
+                pass
         return None, redactor, baseline, False, type(storage_error).__name__
     try:
         redactor = TraceRedactor.from_sources(
@@ -283,6 +301,8 @@ def _finalize_trace_collection(
     supervisor_error_type: str | None,
     redactor: TraceRedactor,
     child_stopped: bool,
+    internal_archive: InternalTraceArchive | None = None,
+    control_dir: Path | None = None,
 ) -> str:
     """Finalize private and public trace storage outside the ACP event loop."""
     trace_status = "scope_complete"
@@ -365,12 +385,43 @@ def _finalize_trace_collection(
         return trace_status
     finally:
         if artifact_store is not None:
-            artifact_store.close()
+            try:
+                artifact_store.close()
+            except Exception:
+                pass
         if scratch is not None:
             try:
                 scratch.finalize()
             except Exception:
                 pass
+        if internal_archive is not None:
+            try:
+                if child_stopped:
+                    internal_archive.collect(
+                        workspace=task.workspace, control_dir=control_dir,
+                        baseline=workspace_baseline, spool=output_spool, scratch=scratch,
+                    )
+                else:
+                    internal_archive.gap("lifecycle", "child_not_stopped")
+                internal_archive.finalize(
+                    run_id=run_id, run_configuration=run_configuration,
+                    outcome=outcome, return_code=return_code,
+                    lifecycle={"started_at": started_at, "elapsed_seconds": elapsed_seconds,
+                               "supervisor_error_type": supervisor_error_type},
+                )
+            except Exception as error:
+                internal_archive.status = "partial"
+                internal_archive.gap("finalization", type(error).__name__)
+                # Keep previously saved records, even when metadata publication fails.
+                try:
+                    internal_archive.finalize(
+                        run_id=run_id, run_configuration=run_configuration,
+                        outcome=outcome, return_code=return_code,
+                        lifecycle={"started_at": started_at, "elapsed_seconds": elapsed_seconds,
+                                   "supervisor_error_type": supervisor_error_type},
+                    )
+                except Exception:
+                    pass
         if output_spool is not None:
             output_spool.close()
 
@@ -390,6 +441,7 @@ async def run_autoresearch_process(
     reasoning_effort: ReasoningEffort | None = None,
 ) -> int:
     """Supervise managed research and finalize its trace after the child stops."""
+    preserve_internal = _preserve_internal_traces(base_environment)
     started_at = datetime.now(timezone.utc).isoformat()
     started_monotonic = time.monotonic()
     process: asyncio.subprocess.Process | None = None
@@ -444,14 +496,33 @@ async def run_autoresearch_process(
         raise
 
     output_spool: PrivateOutputSpool | None = None
+    internal_archive: InternalTraceArchive | None = None
+    if preserve_internal:
+        try:
+            private_redactor = TraceRedactor.from_sources(
+                base_environment, credential_file=connection.auth_file,
+                additional_values=(connection.token,),
+            )
+            internal_archive = InternalTraceArchive.create(
+                DEFAULT_INTERNAL_TRACE_ROOT, run_id, private_redactor,
+            )
+        except Exception as error:
+            # Evidence completeness is assessed independently of research outcome.
+            internal_archive = None
+            run_configuration["internal_trace_error"] = type(error).__name__
 
     try:
-        output_spool = PrivateOutputSpool.create()
+        output_spool = (
+            PrivateOutputSpool.create(max_bytes=None) if preserve_internal
+            else PrivateOutputSpool.create()
+        )
     except Exception:
         # Private retention is observational and cannot affect the research
         # run or the independently sanitized public bundle.
         output_spool = None
 
+    control_temporary: tempfile.TemporaryDirectory | None = None
+    control_dir: Path | None = None
     try:
         try:
             cancelled_before_spawn = bool(cancellation_requested and cancellation_requested())
@@ -461,77 +532,77 @@ async def run_autoresearch_process(
             return_code = 1
             return return_code
 
-        with tempfile.TemporaryDirectory(prefix="neurico-harbor-") as control_dir_value:
-            control_dir = Path(control_dir_value)
-            instruction_file = control_dir / "instruction.txt"
-            instruction_file.write_text(task.instruction, encoding="utf-8")
-            ideas_dir = control_dir / "ideas"
-            codex_home = control_dir / "codex-home"
-            environment = build_autoresearch_environment(
-                base_environment,
-                connection,
-                ideas_dir=ideas_dir,
-                codex_home=codex_home,
-                reasoning_effort=reasoning_effort,
-            )
+        control_temporary = tempfile.TemporaryDirectory(prefix="neurico-harbor-")
+        control_dir = Path(control_temporary.name)
+        instruction_file = control_dir / "instruction.txt"
+        instruction_file.write_text(task.instruction, encoding="utf-8")
+        ideas_dir = control_dir / "ideas"
+        codex_home = control_dir / "codex-home"
+        environment = build_autoresearch_environment(
+            base_environment,
+            connection,
+            ideas_dir=ideas_dir,
+            codex_home=codex_home,
+            reasoning_effort=reasoning_effort,
+        )
 
-            command = [
-                sys.executable,
-                "-m",
-                "neurico_harbor_agent.process_control",
-                sys.executable,
-                "-m",
-                "neurico_harbor_agent.run_autoresearch",
-                "--instruction-file",
-                str(instruction_file),
-                "--workspace",
-                str(task.workspace),
-                "--ideas-dir",
-                str(ideas_dir),
-                "--workflow",
-                workflow,
-            ]
-            if workflow == "autoresearch":
-                command.extend(["--iterations", str(iterations)])
-                if time_limit_seconds is not None:
-                    command.extend(["--time-limit-seconds", str(time_limit_seconds)])
+        command = [
+            sys.executable,
+            "-m",
+            "neurico_harbor_agent.process_control",
+            sys.executable,
+            "-m",
+            "neurico_harbor_agent.run_autoresearch",
+            "--instruction-file",
+            str(instruction_file),
+            "--workspace",
+            str(task.workspace),
+            "--ideas-dir",
+            str(ideas_dir),
+            "--workflow",
+            workflow,
+        ]
+        if workflow == "autoresearch":
+            command.extend(["--iterations", str(iterations)])
+            if time_limit_seconds is not None:
+                command.extend(["--time-limit-seconds", str(time_limit_seconds)])
 
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=task.workspace,
-                env=environment,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=task.workspace,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        output_task = asyncio.create_task(_stream_process_output(process, output_spool))
+        cancelled_before_registration = register_process(process)
+        if cancelled_before_registration:
+            await _terminate_process_tree(
+                process,
+                request_cooperative_stop=True,
             )
-            output_task = asyncio.create_task(_stream_process_output(process, output_spool))
-            cancelled_before_registration = register_process(process)
-            if cancelled_before_registration:
-                await _terminate_process_tree(
-                    process,
-                    request_cooperative_stop=True,
-                )
-                return_code = await output_task
-                return return_code
-            if time_limit_seconds is None:
-                return_code = await output_task
-                return return_code
-            try:
-                return_code = await asyncio.wait_for(
-                    asyncio.shield(output_task),
-                    timeout=time_limit_seconds + _COOPERATIVE_SHUTDOWN_GRACE_SECONDS,
-                )
-                return return_code
-            except TimeoutError:
-                forced_termination = True
-                await emit(
-                    "NeuriCo did not finish cooperative deadline cleanup within "
-                    f"{_COOPERATIVE_SHUTDOWN_GRACE_SECONDS:g} seconds; terminating its process tree.\n"
-                )
-                await _terminate_process_tree(process)
-                await output_task
-                return_code = 1
-                return return_code
+            return_code = await output_task
+            return return_code
+        if time_limit_seconds is None:
+            return_code = await output_task
+            return return_code
+        try:
+            return_code = await asyncio.wait_for(
+                asyncio.shield(output_task),
+                timeout=time_limit_seconds + _COOPERATIVE_SHUTDOWN_GRACE_SECONDS,
+            )
+            return return_code
+        except TimeoutError:
+            forced_termination = True
+            await emit(
+                "NeuriCo did not finish cooperative deadline cleanup within "
+                f"{_COOPERATIVE_SHUTDOWN_GRACE_SECONDS:g} seconds; terminating its process tree.\n"
+            )
+            await _terminate_process_tree(process)
+            await output_task
+            return_code = 1
+            return return_code
     except BaseException as error:
         supervisor_error_type = type(error).__name__
         raise
@@ -571,37 +642,50 @@ async def run_autoresearch_process(
         else:
             outcome = "failed"
 
-        finalize_task = asyncio.create_task(
-            asyncio.to_thread(
-                _finalize_trace_collection,
-                task=task,
-                artifact_store=artifact_store,
-                output_spool=output_spool,
-                run_id=run_id,
-                trace_preflight_ready=trace_preflight_ready,
-                trace_preflight_error_type=trace_preflight_error_type,
-                workspace_baseline=workspace_baseline,
-                run_configuration=run_configuration,
-                started_at=started_at,
-                elapsed_seconds=time.monotonic() - started_monotonic,
-                outcome=outcome,
-                return_code=return_code,
-                supervisor_error_type=supervisor_error_type,
-                redactor=redactor,
-                child_stopped=child_stopped,
-            )
-        )
         try:
-            trace_status = await asyncio.shield(finalize_task)
-        except asyncio.CancelledError:
+            finalize_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _finalize_trace_collection,
+                    task=task,
+                    artifact_store=artifact_store,
+                    output_spool=output_spool,
+                    run_id=run_id,
+                    trace_preflight_ready=trace_preflight_ready,
+                    trace_preflight_error_type=trace_preflight_error_type,
+                    workspace_baseline=workspace_baseline,
+                    run_configuration=run_configuration,
+                    started_at=started_at,
+                    elapsed_seconds=time.monotonic() - started_monotonic,
+                    outcome=outcome,
+                    return_code=return_code,
+                    supervisor_error_type=supervisor_error_type,
+                    redactor=redactor,
+                    child_stopped=child_stopped,
+                    internal_archive=internal_archive,
+                    control_dir=control_dir,
+                )
+            )
             try:
-                await finalize_task
+                trace_status = await asyncio.shield(finalize_task)
+            except asyncio.CancelledError:
+                try:
+                    await finalize_task
+                except Exception:
+                    pass
+                raise
             except Exception:
-                pass
-            raise
-        except Exception:
-            trace_status = "unavailable"
-        await _emit_trace_preservation_notice(emit, trace_status)
+                trace_status = "unavailable"
+            await _emit_trace_preservation_notice(emit, trace_status)
+            if preserve_internal and (internal_archive is None or internal_archive.status != "complete"):
+                try:
+                    await emit("WARNING: NeuriCo internal trace collection is incomplete; "
+                               "the research outcome is unchanged.\n")
+                except BaseException:
+                    pass
+        finally:
+            if control_temporary is not None:
+                control_temporary.cleanup()
+
 
 
 class NeuricoHarborAgent(Agent):
