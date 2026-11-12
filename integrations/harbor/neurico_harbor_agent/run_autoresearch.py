@@ -159,6 +159,14 @@ def main() -> None:
     parser.add_argument("--time-limit-seconds", type=int)
     args = parser.parse_args()
 
+    from core.trace_retention import TRACE_GAP_MARKER
+    from .retention_hooks import install_retention_hooks
+
+    try:
+        install_retention_hooks()
+    except Exception as error:
+        print(f"{TRACE_GAP_MARKER} initialization {type(error).__name__}", flush=True)
+
     stop_requested = threading.Event()
     finished = threading.Event()
 

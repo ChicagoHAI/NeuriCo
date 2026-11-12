@@ -103,3 +103,47 @@ and retaining prior files when finalization fails. `git diff --check` passed.
 This checkpoint verifies final source collection. Invocation coverage and
 retention before destructive rollback/overwrite remain checkpoint 5; complete
 end-to-end evidence is not yet claimed. No model calls were made.
+
+## Checkpoint 5: invocation and rollback retention
+
+Optional core observations now delegate storage to the adapter. With retention
+absent, the observations perform no I/O. Final worker stdin (including runtime
+budget additions), manager messages/tool definitions, exact Codex stdin and raw
+stdout/stderr, and invocation outcomes are retained separately before native
+filenames can be reused. Invocation-time runtime state preserves existing stage
+and worker-request references. Compaction and retry calls pass through the same
+manager boundary. Native provider sessions remain the authority for provider
+instructions, emitted tool events and usage.
+
+At the existing rollback boundary, after existing cancellation settles workers,
+the adapter copies manager history, runtime, plans, logs, and changed research
+outputs before restoration. It also exports existing private Git state snapshots
+when created, without creating or moving checkpoints. Replay keeps the earlier
+copy. A failed recorder reports a collection gap and leaves workflow control
+unchanged. The manifest correlates emitted session IDs with retained native
+sessions, distinguishes pre-session failure, and flags missing/interrupted calls.
+
+| Record family | Retained source |
+| --- | --- |
+| Effective instruction and idea | `instruction.txt`, `idea_registry/`; frozen task/frame/config supplied by gapbench |
+| Final worker prompt and outcomes | `invocations/worker-*/input.json`, `outcome.json`, copied native logs/transcripts and runtime |
+| Manager inputs, tools, raw responses, stderr/failures | `invocations/manager-*/input.json`, `provider_input.json`, `provider_output.json`, `outcome.json` |
+| Manager tool history and compaction context | `.neurico/hitl/manager/history.sqlite`, manager invocation messages and existing state snapshots |
+| Provider-native session instructions, tool events and usage | `provider/sessions/`, other emitted provider logs/state; IDs correlated in manifest |
+| Research plans/state, discussions, outputs including binaries | Original workspace-relative paths; pre-restore versions in `snapshots/` |
+| Cancellation, rollback, replacements and failures | Per-invocation outcomes, runtime copies, snapshot descriptors, complete child stream and lifecycle manifest |
+| Official scoring and task-declared artifacts | Native Harbor verifier/result/artifact output, unchanged by the adapter |
+| Accounting | Original native session usage and invocation elapsed times; no inferred totals |
+
+Validation (2026-11-12): **63 passed** across retention, private collection,
+manager MCP retry/failure and timeout suites. Broader manager/AutoResearch,
+focused/task-context and adapter suites: **236 passed, 7 Linux-only skipped**;
+one subprocess-handshake test initially failed because the manually invoked
+test environment omitted import roots. Rerunning with all three absolute roots
+passed (**1 passed**). Updated retention fixtures also passed (**17 passed**).
+Use `PYTHONPATH="$PWD:$PWD/src:$PWD/integrations/harbor"` with the adapter test
+Python when invoking tests directly from this worktree. The fixture matrix
+compares enabled, disabled and failing retention, including exact provider
+inputs/arguments, returns, cancellation/rollback order and restored state.
+`git diff --check` passed. No model calls were made. Linux and live pilot coverage
+remain checkpoint 8; retained source presence is not yet end-to-end validation.

@@ -16,6 +16,7 @@ from typing import Any
 
 from core.hitl_manager_history import HitlManagerHistory
 from core.hitl_util import atomic_write_bytes
+from core.trace_retention import TRACE_GAP_MARKER
 
 from .artifacts import (
     TraceRedactor, WorkspaceBaseline, _CACHE_DIR_NAMES, _DEPENDENCY_DIR_NAMES,
@@ -263,6 +264,8 @@ class InternalTraceArchive:
                     else:
                         source_lines = lines
                     for clean in _sanitize_free_text_lines(source_lines, self.redactor):
+                        if TRACE_GAP_MARKER in clean:
+                            self.gap("retention_hooks", "recording_failed")
                         if self.redactor.contains_secret(clean):
                             raise ValueError("stream could not be sanitized")
                         sanitized = sanitized or "[REDACTED" in clean
@@ -322,6 +325,7 @@ class InternalTraceArchive:
             ("stream", lambda: self.stream(spool)),
             ("workspace", lambda: self.workspace(workspace, baseline)),
             ("scratch", lambda: self.scratch(scratch, workspace)),
+            ("retention_hooks", self.retained_records),
         ]
         if control_dir is not None:
             sources.extend([
@@ -348,15 +352,82 @@ class InternalTraceArchive:
         for name in sorted(names):
             self.tree(home / name, Path("provider") / name, "provider")
 
+    def retained_records(self) -> None:
+        for name in ("invocations", "snapshots"):
+            root = self.directory / name
+            if root.is_dir():
+                for path in sorted(root.rglob("*")):
+                    if path.is_file() and not path.is_symlink():
+                        self._index(path.relative_to(self.directory), "retention", sanitized=True)
+        gaps = self.directory / "retention-gaps.json"
+        if gaps.is_file():
+            self._index(Path("retention-gaps.json"), "retention", sanitized=True)
+            self.gaps.extend(json.loads(gaps.read_text()))
+
+    def invocation_inventory(self) -> list[dict[str, Any]]:
+        """Relate retained calls to the native sessions they actually emitted."""
+        sessions = {item["id"]: item["source"] for item in self.observations
+                    if item["type"] == "session_meta" and "id" in item}
+        records = []
+        for folder in sorted((self.directory / "invocations").glob("*")):
+            if not folder.is_dir():
+                continue
+            relative = folder.relative_to(self.directory).as_posix()
+            record = {"path": relative, "sessions": []}
+            records.append(record)
+            try:
+                inputs = json.loads((folder / "input.json").read_text())
+                record["kind"] = inputs["kind"]
+                if not (folder / "outcome.json").is_file():
+                    self.gap(relative, "invocation_interrupted")
+                    continue
+                outcome = json.loads((folder / "outcome.json").read_text())["outcome"]
+                if inputs["kind"] == "manager":
+                    provider = json.loads((folder / "provider_output.json").read_text())
+                    if not (folder / "provider_input.json").is_file():
+                        self.gap(relative, "provider_input_missing")
+                    output = provider["stdout"]
+                    success = provider.get("return_code") == 0
+                else:
+                    output_path = folder / Path(inputs["transcript_file"]).name
+                    output = output_path.read_text() if output_path.is_file() else ""
+                    success = outcome.get("success", False)
+                    if outcome.get("process_started") and not output_path.is_file():
+                        self.gap(relative, "worker_transcript_missing")
+                ids = set()
+                for line in output.splitlines():
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(event, dict) and event.get("type") == "thread.started":
+                        if event.get("thread_id"):
+                            ids.add(event["thread_id"])
+                record["sessions"] = [{"id": identity, "source": sessions.get(identity)}
+                                      for identity in sorted(ids)]
+                for identity in sorted(ids):
+                    if identity not in sessions:
+                        self.gap(relative, f"native_session_missing:{identity}")
+                if success and not ids:
+                    self.gap(relative, "successful_call_session_unobservable")
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                self.gap(relative, f"invocation_record_unreadable:{type(error).__name__}")
+        return records
+
     def finalize(self, *, run_id: str, run_configuration: dict[str, Any],
                  outcome: str, return_code: int | None,
                  lifecycle: dict[str, Any] | None = None) -> None:
+        invocations = self.invocation_inventory()
+        if (return_code == 0 and run_configuration.get("workflow") == "focused-managed-ordinary"
+                and {record.get("kind") for record in invocations} != {"manager", "worker"}):
+            self.gap("invocations", "successful_workflow_records_missing")
         self.status = "partial" if self.gaps else "complete"
         manifest = {
             "schema_version": 1, "run_id": run_id, "configuration": run_configuration,
             "outcome": outcome, "return_code": return_code, "finalized": True,
             "collection_status": self.status,
             "files": [self.files[key] for key in sorted(self.files)],
+            "invocations": invocations,
             "gaps": self.gaps, "observed_provider_settings": self.observations,
             "lifecycle": lifecycle or {}, "runtime": _runtime_inventory(),
             "adapter_revision": _git_output(Path(__file__).resolve().parents[3], "rev-parse", "HEAD"),

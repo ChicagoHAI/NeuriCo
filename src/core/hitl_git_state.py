@@ -259,6 +259,10 @@ class HitlGitStateStore:
                     commit_args.extend(["-p", previous])
             commit_sha = self._run_git(*commit_args).strip()
             self._run_git("update-ref", ref, commit_sha)
+        from core.trace_retention import retain_trace
+
+        retain_trace("state_checkpoint", work_dir=str(self.work_dir), ref=ref,
+                     commit_sha=commit_sha, paths=normalized_paths)
         return HitlGitSnapshot(ref=ref, commit_sha=commit_sha, paths=tuple(normalized_paths))
 
     def _manager_conversation_snapshot_guard(self, paths: Sequence[str]):

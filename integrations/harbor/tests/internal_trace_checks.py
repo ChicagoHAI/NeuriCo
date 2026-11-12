@@ -210,7 +210,9 @@ print('child output secret-value', flush=True)
     assert not captured["control"].exists()
     archive = private_root / "run"
     manifest = json.loads((archive / "manifest.json").read_text())
-    assert manifest["collection_status"] == "complete", manifest["gaps"]
+    assert manifest["collection_status"] == ("partial" if exit_code == 0 else "complete")
+    if exit_code == 0:
+        assert manifest["gaps"] == [{"source": "invocations", "reason": "successful_workflow_records_missing"}]
     assert manifest["outcome"] == ("success" if exit_code == 0 else "failed")
     assert (archive / "instruction.txt").read_text() == "Exact task\nFrame\n"
     assert (archive / "idea_registry/submitted/task.yaml").is_file()

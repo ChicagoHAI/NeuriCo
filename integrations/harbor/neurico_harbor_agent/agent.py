@@ -545,6 +545,10 @@ async def run_autoresearch_process(
             codex_home=codex_home,
             reasoning_effort=reasoning_effort,
         )
+        if internal_archive is not None:
+            environment["NEURICO_RESEARCH_TRACE_DIR"] = str(internal_archive.directory)
+        else:
+            environment.pop("NEURICO_RESEARCH_TRACE_DIR", None)
 
         command = [
             sys.executable,

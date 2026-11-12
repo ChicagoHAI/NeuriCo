@@ -57,9 +57,18 @@ is checked for otherwise unretained records; truncated prefixes are flagged
 unless the complete original source was recovered. No new research deadline,
 retry policy, or workflow stage is introduced by collection.
 
-This integration is still being validated: preservation before rollback and
-full invocation-coverage checks are the next implementation checkpoint. Final
-collection alone cannot recover records already overwritten or restored away.
+When enabled, narrow recording hooks retain final worker prompts, manager
+requests/raw responses/stderr, per-invocation outcomes and existing runtime
+identities. They copy evidence before native logs are reused or rollback removes
+work. Existing private state checkpoints are exported without creating new
+checkpoints or changing workflow decisions. Collection failures are recorded
+independently and do not prevent normal cancellation, restoration or completion.
+
+The manifest relates emitted provider session IDs to retained native records;
+missing records and interrupted calls are explicit gaps. An early provider
+failure does not require a session that never started. Linux lifecycle and live
+Harbor/gapbench validation are still pending; end-to-end readiness is not yet
+claimed.
 
 ## Contract
 

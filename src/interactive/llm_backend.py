@@ -170,51 +170,65 @@ class LLMBackend:
                 allowed_mcp_tools=allowed_mcp_tools,
                 startup_timeout_seconds=mcp_startup_timeout_seconds,
             )
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=self._manager_process_environment(),
-            start_new_session=(os.name == "posix"),
-        )
-        self._set_active_process(process)
+        from core.trace_retention import current_trace_invocation, retain_trace
+
+        trace_id = current_trace_invocation()
+        retain_trace("provider_input", invocation_id=trace_id, prompt=prompt, command=cmd)
+        stdout, stderr = "", ""
+        process = None
         try:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=self._manager_process_environment(),
+                start_new_session=(os.name == "posix"),
+            )
+            self._set_active_process(process)
             try:
-                stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
-            except subprocess.TimeoutExpired as exc:
-                self._terminate_process_group(process)
-                raise TimeoutError(
-                    "Codex CLI backend timed out after "
-                    f"{timeout_seconds:g} seconds"
-                ) from exc
-        finally:
-            self._clear_active_process(process)
-        if process.returncode != 0:
-            error_msg = stderr.strip() if stderr else f"codex exec exited with code {process.returncode}"
-            if mcp_config_path and self._codex_required_mcp_startup_failed(
-                stdout=stdout,
-                stderr=stderr,
-                server_names=self._mcp_server_names(mcp_config_path),
-            ):
-                server_names = self._mcp_server_names(mcp_config_path)
-                if self._codex_required_mcp_startup_timed_out(
+                try:
+                    stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
+                except subprocess.TimeoutExpired as exc:
+                    stdout = exc.output or ""
+                    stderr = exc.stderr or ""
+                    self._terminate_process_group(process)
+                    raise TimeoutError(
+                        "Codex CLI backend timed out after "
+                        f"{timeout_seconds:g} seconds"
+                    ) from exc
+            finally:
+                self._clear_active_process(process)
+            if process.returncode != 0:
+                error_msg = stderr.strip() if stderr else f"codex exec exited with code {process.returncode}"
+                if mcp_config_path and self._codex_required_mcp_startup_failed(
                     stdout=stdout,
                     stderr=stderr,
-                    server_names=server_names,
+                    server_names=self._mcp_server_names(mcp_config_path),
                 ):
-                    raise McpReadinessTimeout(
-                        "Codex did not report manager MCP readiness within the "
-                        "current startup window."
+                    server_names = self._mcp_server_names(mcp_config_path)
+                    if self._codex_required_mcp_startup_timed_out(
+                        stdout=stdout,
+                        stderr=stderr,
+                        server_names=server_names,
+                    ):
+                        raise McpReadinessTimeout(
+                            "Codex did not report manager MCP readiness within the "
+                            "current startup window."
+                        )
+                    raise McpInitializationError(
+                        "Codex could not initialize required manager MCP server(s): "
+                        + ", ".join(server_names)
                     )
-                raise McpInitializationError(
-                    "Codex could not initialize required manager MCP server(s): "
-                    + ", ".join(server_names)
-                )
-            raise RuntimeError(f"Codex CLI backend error: {error_msg}")
-        return self._parse_codex_cli_response(stdout)
+                raise RuntimeError(f"Codex CLI backend error: {error_msg}")
+            return self._parse_codex_cli_response(stdout)
+
+        finally:
+            retain_trace("provider_output", invocation_id=trace_id, stdout=stdout, stderr=stderr,
+                         process_started=process is not None,
+                         return_code=getattr(process, "returncode", None))
 
     @staticmethod
     def _codex_config_value(value: Any) -> str:

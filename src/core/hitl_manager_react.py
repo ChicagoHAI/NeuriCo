@@ -3242,33 +3242,42 @@ class HitlManager:
 
         def call_backend() -> None:
             try:
-                if supports_adapter_contract:
-                    kwargs: Dict[str, Any] = {
-                        "timeout_seconds": None,
-                        "disable_native_tools": True,
-                    }
-                    if "use_dedicated_system_prompt" in parameters or any(
-                        parameter.kind is inspect.Parameter.VAR_KEYWORD
-                        for parameter in parameters.values()
-                    ):
-                        kwargs["use_dedicated_system_prompt"] = True
-                    provider_tools: List[Dict[str, Any]] = tools
-                    if use_cli_mcp:
-                        kwargs["mcp_config_path"] = str(self._mcp_config_path)
-                        kwargs["allowed_mcp_tools"] = [
-                            self._mcp_allowed_tool_name(str(tool["name"])) for tool in tools
-                        ]
-                        if "mcp_startup_timeout_seconds" in parameters or any(
+                from core.trace_retention import retained_invocation
+
+                with retained_invocation(
+                    "manager", messages=messages, tools=tools, work_dir=str(self.work_dir),
+                ) as trace_outcome:
+                    if supports_adapter_contract:
+                        kwargs: Dict[str, Any] = {
+                            "timeout_seconds": None,
+                            "disable_native_tools": True,
+                        }
+                        if "use_dedicated_system_prompt" in parameters or any(
                             parameter.kind is inspect.Parameter.VAR_KEYWORD
                             for parameter in parameters.values()
                         ):
-                            kwargs["mcp_startup_timeout_seconds"] = (
-                                mcp_startup_timeout_seconds
-                            )
-                        provider_tools = []
-                    response = active_backend.send(messages, provider_tools, **kwargs)
-                else:
-                    response = active_backend.send(messages, tools)
+                            kwargs["use_dedicated_system_prompt"] = True
+                        provider_tools: List[Dict[str, Any]] = tools
+                        if use_cli_mcp:
+                            kwargs["mcp_config_path"] = str(self._mcp_config_path)
+                            kwargs["allowed_mcp_tools"] = [
+                                self._mcp_allowed_tool_name(str(tool["name"])) for tool in tools
+                            ]
+                            if "mcp_startup_timeout_seconds" in parameters or any(
+                                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                                for parameter in parameters.values()
+                            ):
+                                kwargs["mcp_startup_timeout_seconds"] = (
+                                    mcp_startup_timeout_seconds
+                                )
+                            provider_tools = []
+                        response = active_backend.send(messages, provider_tools, **kwargs)
+                    else:
+                        response = active_backend.send(messages, tools)
+                    trace_outcome["response"] = {
+                        "text": getattr(response, "text", ""),
+                        "raw": getattr(response, "raw", None),
+                    }
                 result.put((True, response))
             except BaseException as exc:
                 result.put((False, exc))

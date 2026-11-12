@@ -1038,6 +1038,10 @@ class HitlStageRollback:
         cleanup_after_restore: Callable[[Dict[str, Any]], None] | None = None,
     ) -> None:
         """Restore the boundary in the established public-then-private order."""
+        from core.trace_retention import retain_trace
+
+        retain_trace("rollback_request", work_dir=str(self.work_dir),
+                     boundary=self.descriptor(), reason=reason)
         runtime.abandon_pending_worker_request_for_rollback(reason)
         runtime.clear_idea_tool_context()
 
@@ -1076,6 +1080,9 @@ class HitlStageRollback:
             return None
         if record["status"] == "restoring":
             rollback = cls.from_descriptor(work_dir, record["boundary"])
+            from core.trace_retention import retain_trace
+
+            retain_trace("before_restore", work_dir=str(work_dir), record=record)
             restore_hitl_checkpoint_with_artifacts(
                 work_dir,
                 checkpoint_sha=rollback.checkpoint_sha,
