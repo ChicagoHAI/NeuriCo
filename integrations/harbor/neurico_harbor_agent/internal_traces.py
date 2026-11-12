@@ -23,7 +23,7 @@ from .artifacts import (
     _PROVIDER_HOME_DIR_NAMES, _decode_text_payload, _stat_fingerprint,
     _is_credential_path, _safe_text_payload, _sanitize_free_text_lines,
     _sanitize_trace_text, _validate_run_id, _write_json,
-    _runtime_inventory, _git_output,
+    _runtime_inventory, _git_output, _contains_unredacted_sensitive_material,
 )
 from .scratch import EphemeralRunScratch, PrivateOutputSpool
 
@@ -164,10 +164,24 @@ class InternalTraceArchive:
                 if _decode_text_payload(raw) is not None:
                     safe = _safe_text_payload(raw, source.suffix, self.redactor)
                     if safe is None:
-                        raise ValueError("text could not be sanitized")
+                        # Record the failed check, never the rejected content or
+                        # credential values. A bare ValueError hides the boundary
+                        # needed to diagnose missing native evidence.
+                        clean = _sanitize_trace_text(raw.decode("utf-8"), source.suffix, self.redactor)
+                        checks = []
+                        if self.redactor.contains_secret(clean):
+                            checks.append("secret_value_remaining")
+                        if _contains_unredacted_sensitive_material(clean):
+                            checks.append("sensitive_material_remaining")
+                        self.gap(relative.as_posix(), "text_sanitization_rejected:" + ",".join(checks))
+                        return
                     payload, sanitized = safe
                 else:
-                    self._check_binary_credentials(raw)
+                    try:
+                        self._check_binary_credentials(raw)
+                    except ValueError:
+                        self.gap(relative.as_posix(), "binary_credential_detected")
+                        return
                     payload, sanitized = raw, False
             self._publish(relative, payload, family, sanitized=sanitized)
             if family == "provider" and source.suffix == ".jsonl":

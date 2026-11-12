@@ -217,3 +217,19 @@ hashes/sizes verified) after cleanup. Harbor still reports the official
 10-second `AgentTimeoutError` and reward 0. The success, failed-child and
 public-export-failure cases also pass. The separate two-frame live pilot has
 now started; no final integration completion claim is made yet.
+
+## Live-pilot archive diagnosis
+
+The first live pilot is not evidence-complete. Both final manager context files
+and one safety worker native session were omitted with only `ValueError` in the
+manifest. Earlier manager-context snapshots, manager inputs/responses, worker
+transcripts and SQLite histories survived; these are useful evidence but are not
+claimed as complete replacements for the missing originals. The original task
+containers and temporary provider homes have already been removed.
+
+Added specific, content-free rejection reasons for text post-sanitization checks
+and credential-bearing binary detection. This changes diagnostics only: it does
+not weaken sanitization or claim the omission is fixed. The private archive suite
+passes **22 tests**, including checks that rejected payloads and credential values
+are not written into diagnostics. The pilot review in gapbench tracks the wider
+readiness investigation. No additional model calls were made for this step.

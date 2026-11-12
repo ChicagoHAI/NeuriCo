@@ -325,3 +325,27 @@ def test_private_retention_does_not_treat_harbor_auth_policy_as_credential():
     assert "autoresearch" not in TraceRedactor.from_sources(environment).sanitize("autoresearch")
     # A real credential with the same literal value must still be redacted.
     assert private_trace_redactor({**environment, "OPENAI_API_KEY": "auto"}).sanitize("auto").startswith("[REDACTED")
+
+
+def test_rejected_text_records_check_without_payload(tmp_path, monkeypatch):
+    import neurico_harbor_agent.internal_traces as module
+
+    archive = _archive(tmp_path)
+    source = tmp_path / "context.jsonl"
+    source.write_text('{"content":"private research"}\n')
+    monkeypatch.setattr(module, "_safe_text_payload", lambda *a, **k: None)
+    monkeypatch.setattr(module, "_sanitize_trace_text", lambda *a, **k: "secret-value")
+    archive.copy_file(source, Path("context.jsonl"), "research")
+    assert archive.gaps == [{"source": "context.jsonl", "reason":
+                             "text_sanitization_rejected:secret_value_remaining"}]
+    assert "secret-value" not in json.dumps(archive.gaps)
+    assert not (archive.directory / "context.jsonl").exists()
+
+
+def test_binary_rejection_has_specific_safe_reason(tmp_path):
+    archive = _archive(tmp_path)
+    source = tmp_path / "output.bin"
+    source.write_bytes(b"\x00secret-value")
+    archive.copy_file(source, Path("output.bin"), "research")
+    assert archive.gaps == [{"source": "output.bin", "reason": "binary_credential_detected"}]
+    assert not (archive.directory / "output.bin").exists()
