@@ -57,6 +57,20 @@ _SENSITIVE_FIELD_TOKEN_PAIRS = frozenset(
 )
 _SENSITIVE_FIELD_COMPOUNDS = frozenset("".join(parts) for parts in _SENSITIVE_FIELD_TOKEN_PAIRS)
 _TOKEN_FIELD_TOKENS = frozenset({"token", "tokens"})
+_SENSITIVE_SINGLE_FIELD_TOKENS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "credential",
+        "credentials",
+        "password",
+        "passwd",
+        "secret",
+    }
+)
+_SENSITIVE_COMPACT_FIELD_SUFFIXES = tuple(
+    sorted(_SENSITIVE_SINGLE_FIELD_TOKENS | _TOKEN_FIELD_TOKENS, key=len, reverse=True)
+)
 _NON_SECRET_TOKEN_METADATA_DESCRIPTORS = frozenset(
     {
         "budget",
@@ -673,9 +687,9 @@ def _is_sensitive_field_name(field_name: str) -> bool:
     normalized_field_name = "".join(tokens)
     if any(compound in normalized_field_name for compound in _SENSITIVE_FIELD_COMPOUNDS):
         return True
-    if token_set & {"authorization", "cookie", "credential", "credentials", "password", "passwd"}:
+    if token_set & _SENSITIVE_SINGLE_FIELD_TOKENS:
         return True
-    if "secret" in token_set:
+    if len(tokens) == 1 and normalized_field_name.endswith(_SENSITIVE_COMPACT_FIELD_SUFFIXES):
         return True
     if "auth" in token_set or tokens == ("dsn",) or tokens == ("key",) or tokens == ("pat",):
         return True

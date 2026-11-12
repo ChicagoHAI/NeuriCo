@@ -303,6 +303,20 @@ def test_trace_redactor_covers_unlabelled_secret_forms() -> None:
             ".json",
             "opaque-prefixed-token-count-value",
         ),
+        ('{"dbpassword":"opaque-db-password"}\n', ".json", "opaque-db-password"),
+        (
+            "servicecredential: opaque-service-credential\n",
+            ".yaml",
+            "opaque-service-credential",
+        ),
+        ("appsecret=opaque-app-secret\n", ".log", "opaque-app-secret"),
+        ('{"githubtoken":"opaque-github-token"}\n', ".json", "opaque-github-token"),
+        ("sessioncookie: opaque-session-cookie\n", ".yaml", "opaque-session-cookie"),
+        (
+            "requestauthorization=opaque-request-authorization\n",
+            ".log",
+            "opaque-request-authorization",
+        ),
     ],
 )
 def test_trace_redactor_covers_common_sensitive_field_styles(
@@ -326,7 +340,8 @@ def test_harmless_metadata_fields_remain_public() -> None:
     payload = (
         '{"tokenCount":17,"tokenBudget":100,"tokencount":23,'
         '"api_request_count":29,"monkeyCount":31,"secretary_count":37,'
-        '"input_tokens_used":41}\n'
+        '"input_tokens_used":41,"passwordless":true,"credentialing":"active",'
+        '"cookiecutter":"template","author":"Ada","compat":"ok"}\n'
     )
     safe_payload = artifacts_module._safe_text_payload(
         payload.encode("utf-8"),
@@ -338,8 +353,13 @@ def test_harmless_metadata_fields_remain_public() -> None:
     rendered = json.loads(safe_payload[0])
     assert rendered == {
         "api_request_count": 29,
+        "author": "Ada",
+        "compat": "ok",
+        "cookiecutter": "template",
+        "credentialing": "active",
         "input_tokens_used": 41,
         "monkeyCount": 31,
+        "passwordless": True,
         "secretary_count": 37,
         "tokenBudget": 100,
         "tokenCount": 17,
