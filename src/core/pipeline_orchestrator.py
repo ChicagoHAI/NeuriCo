@@ -2171,10 +2171,6 @@ class ResearchPipelineOrchestrator:
                 on_failed=finalize_failed,
                 resume_worker=self._resume_initial_worker,
                 execution_log_prefix="resource_finder_hitl_execute_1",
-                focused_autoresearch=(
-                    self.focused_autoresearch if self.hitl_autoresearch else False
-                ),
-                focused_managed_ordinary=self.focused_managed_ordinary,
                 planning_mode_config=self.planning_mode_config,
                 planning_meeting_owner=(
                     self._initial_stage_planning_owner(
@@ -2192,6 +2188,10 @@ class ResearchPipelineOrchestrator:
                     if planning_requested
                     else None
                 ),
+                focused_autoresearch=(
+                    self.focused_autoresearch if self.hitl_autoresearch else False
+                ),
+                focused_managed_ordinary=self.focused_managed_ordinary,
             )
 
         except HitlRunStopRequested:
