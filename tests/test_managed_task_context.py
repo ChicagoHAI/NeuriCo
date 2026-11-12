@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -72,7 +73,7 @@ def test_binding_preserves_full_task_and_caller(tmp_path):
     assert HitlRuntimeState(tmp_path).task_context() == state.task_context()
 
 
-def test_binding_normalizes_yaml_dates_without_mutating_idea(tmp_path):
+def test_binding_preserves_yaml_dates_without_mutating_idea(tmp_path):
     source = yaml.safe_load("""
 idea:
   constraints:
@@ -84,25 +85,79 @@ idea:
 """)
     original = deepcopy(source)
     bound = HitlRuntimeState(tmp_path).bind_task_context(source)
-    assert bound["idea"]["constraints"] == {
-        "deadline": "2026-11-09",
-        "milestones": [{"at": "2026-11-09T12:30:00+00:00", "required": True, "count": 2}],
-    }
+    assert bound == original
     assert HitlRuntimeState(tmp_path).task_context() == bound
     assert source == original
 
 
 def test_binding_rejects_unknown_objects(tmp_path):
     state = HitlRuntimeState(tmp_path)
-    with pytest.raises(TypeError, match="Unsupported task-context value: object"):
+    with pytest.raises(yaml.representer.RepresenterError):
         state.bind_task_context({"idea": {"constraints": {"custom": object()}}})
     assert HitlRuntimeState(tmp_path).task_context() is None
+
+
+@pytest.mark.parametrize("custom_yaml", [
+    "2026-11-09",
+    "2026-11-09T12:30:00Z",
+    "!!set {alpha: null, beta: null}",
+    "!!binary aGVsbG8=",
+    "{2026-11-09: due, 2: two, null: empty}",
+    "[{tags: !!set {alpha: null}, payload: !!binary aGVsbG8=}]",
+])
+def test_valid_yaml_idea_initializes_hitl_and_survives_restart(tmp_path, monkeypatch, custom_yaml):
+    from cli.hitl_launcher import initialize_manager_task
+    from core.idea_manager import IdeaManager
+
+    registry = tmp_path / "ideas"
+    monkeypatch.setenv("NEURICO_IDEAS", str(registry))
+    source = yaml.safe_load(
+        "idea:\n  title: YAML context test\n  domain: machine_learning\n"
+        "  hypothesis: A concrete hypothesis long enough for validation.\n"
+        "  constraints:\n    custom: " + custom_yaml
+    )
+    ideas = IdeaManager(registry)
+    assert ideas.validate_idea(source)["valid"]
+    idea_id = ideas.submit_idea(source)
+    submitted = deepcopy(ideas.get_idea(idea_id))
+    work_dir = tmp_path / "workspace"
+    initialize_manager_task(ROOT, idea_id, work_dir)
+    state = HitlRuntimeState(work_dir)
+    assert state.task_context() == submitted
+    assert isinstance(json.loads(state.path.read_text())["task_context"], str)
+    assert ideas.get_idea(idea_id) == submitted
+    assert task_from(manager(work_dir)._messages(0, [])) == submitted
+    # Initialization on reopen must retain the original binding.
+    initialize_manager_task(ROOT, idea_id, work_dir)
+    assert HitlRuntimeState(work_dir).task_context() == submitted
+    returned = state.task_context()
+    returned["idea"]["constraints"].clear()
+    assert state.task_context() == submitted
+
+
+def test_legacy_dictionary_context_remains_readable_and_preserved(tmp_path):
+    state = HitlRuntimeState(tmp_path)
+    legacy = {"idea": {"title": "Existing task", "constraints": {"deadline": "2026-11-09"}}}
+    with state._locked():
+        state._state["task_context"] = legacy
+        state._save_unlocked()
+    assert HitlRuntimeState(tmp_path).task_context() == legacy
+    bound = state.bind_task_context({"idea": {"title": "Replacement"}})
+    assert bound == legacy
+    bound["idea"]["title"] = "Mutated copy"
+    assert task_from(manager(tmp_path)._messages(0, [])) == legacy
+    assert state.bind_task_context(legacy, prepare_run=True) == legacy
+    assert isinstance(state.snapshot()["task_context"], str)
 
 
 @pytest.mark.parametrize("mode", ["full", "auto"])
 def test_manager_receives_task_outside_history_after_compaction_and_restart(tmp_path, mode):
     value = manager(tmp_path, mode, tokens=4000)
-    bound = value.runtime_state.bind_task_context(idea())
+    source = idea()
+    source["idea"]["constraints"] = yaml.safe_load(
+        "deadline: 2026-11-09\ntags: !!set {alpha: null, beta: null}\npayload: !!binary aGVsbG8="
+    )
+    bound = value.runtime_state.bind_task_context(source)
     for i in range(16):
         value.conversation.append("human", f"Discussion {i}: " + "history " * 400)
     prepare = value.conversation.prepare

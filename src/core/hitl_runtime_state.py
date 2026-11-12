@@ -11,9 +11,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
+
+import yaml
 
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
@@ -86,13 +87,6 @@ _PROPOSAL_DISCUSSION_PHASES = frozenset(
     {"initial", "opening", "response", "decision", "final_writing", "reopen_pending"}
 )
 _FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
-
-
-def _task_json_scalar(value: Any) -> str:
-    """Represent YAML dates/timestamps without coercing unrelated objects."""
-    if isinstance(value, date):
-        return value.isoformat()
-    raise TypeError(f"Unsupported task-context value: {type(value).__name__}")
 
 
 def worker_command_requires_resume(command: Any) -> bool:
@@ -580,7 +574,17 @@ class HitlRuntimeState:
 
     def task_context(self) -> Optional[Dict[str, Any]]:
         """Return the complete runtime-bound task, independently of research history."""
-        return self.snapshot().get("task_context")
+        return self.decode_task_context(self.snapshot().get("task_context"))
+
+    @staticmethod
+    def decode_task_context(saved: Any) -> Optional[Dict[str, Any]]:
+        """Read YAML text or the JSON dictionary stored by older runtimes."""
+        if saved is None:
+            return None
+        task = yaml.safe_load(saved) if isinstance(saved, str) else HitlRuntimeState._copy(saved)
+        if not isinstance(task, dict):
+            raise HitlRuntimeStateError("Saved task context must contain an idea mapping.")
+        return task
 
     def bind_task_context(
         self, idea: Dict[str, Any], *, prepare_run: bool = False
@@ -605,12 +609,10 @@ class HitlRuntimeState:
             )
             if saved is None or (prepare_run and not held):
                 saved = manager_task_copy(self.work_dir, without_runtime_compute_backend(idea))
-                saved = json.loads(json.dumps(
-                    saved, ensure_ascii=False, default=_task_json_scalar
-                ))
+                saved = yaml.safe_dump(saved, sort_keys=False, allow_unicode=True)
                 self._state["task_context"] = saved
                 self._save_unlocked()
-            return self._copy(saved)
+            return self.decode_task_context(saved)
 
     def manager_provider(self) -> str:
         """Return the workspace's selected manager backend, if configured."""

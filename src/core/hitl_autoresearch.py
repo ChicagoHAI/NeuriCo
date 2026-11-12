@@ -1534,7 +1534,7 @@ def _validate_budget_preparation_cleanup(value: Any) -> Dict[str, Any]:
         or not parent
         or action_status not in {"pending", "decision_recorded", "resolved", "cancelled"}
         or (recovery is not None and not isinstance(recovery, dict))
-        or (task_context is not None and not isinstance(task_context, dict))
+        or (task_context is not None and not isinstance(task_context, (str, dict)))
         or (
             prepared_artifacts is not None
             and (
@@ -1559,7 +1559,7 @@ def _begin_budget_preparation_cleanup(
     if existing is not None:
         cleanup = _validate_budget_preparation_cleanup(existing)
         # Upgrade an older pending cleanup before its restore can erase the task.
-        task_context = HitlRuntimeState(work_dir).task_context()
+        task_context = HitlRuntimeState(work_dir).snapshot().get("task_context")
         if (
             cleanup["status"] == "prepared"
             and "task_context" not in cleanup
@@ -1588,7 +1588,7 @@ def _begin_budget_preparation_cleanup(
             raise RuntimeError("Proposal preparation has invalid recovery state.")
         HitlStageRollback.from_descriptor(work_dir, recovery)
 
-    task_context = HitlRuntimeState(work_dir).task_context()
+    task_context = HitlRuntimeState(work_dir).snapshot().get("task_context")
     cleanup = {
         "version": 1,
         "status": "prepared",
@@ -1663,7 +1663,9 @@ def _finalize_budget_exhausted_preparation(
 
         # The durable cleanup retains the task even if interrupted after restore.
         if cleanup.get("task_context") is not None:
-            HitlRuntimeState(work_dir).bind_task_context(cleanup["task_context"])
+            HitlRuntimeState(work_dir).bind_task_context(
+                HitlRuntimeState.decode_task_context(cleanup["task_context"])
+            )
 
         request_key = HitlRuntimeState(
             work_dir
