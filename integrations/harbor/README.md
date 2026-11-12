@@ -15,6 +15,10 @@ finder and experiment runner with the manager in Auto mode, including the normal
 planning, review, revision, and completion boundaries. It enables focused mode
 and disables internal scoring, the AutoResearch improvement loop, paper writing,
 and scribe output. Harbor's verifier evaluates the delivered task solution.
+In this unscored benchmark workflow, NeuriCo does not require an additional
+research-only `REPORT.md`; any report explicitly requested by the task remains
+part of the supplied instructions. Ordinary non-benchmark reporting and scored
+AutoResearch artifact validation retain their existing contracts.
 
 `NEURICO_HARBOR_AUTORESEARCH_ITERATIONS` and
 `NEURICO_HARBOR_TIME_LIMIT_SECONDS` apply only to AutoResearch and are ignored

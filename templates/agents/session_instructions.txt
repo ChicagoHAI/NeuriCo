@@ -109,10 +109,11 @@ At the START of your session, check for GPU availability:
    - Reduce model sizes if needed (e.g., use smaller transformer models)
    - Consider using smaller datasets for feasibility
 
-4. Document GPU usage in REPORT.md:
+{% if not benchmark_mode %}4. Document GPU usage in REPORT.md:
    - GPU model and memory
    - Batch sizes used
    - Training time comparisons
+{% endif %}
 
 CRITICAL: Resources Have Been Pre-Gathered
 ────────────────────────────────────────────────────────────────────────────────
@@ -146,7 +147,7 @@ WHAT "FULLY-AUTOMATED" MEANS:
 ✓ Move immediately from one phase to the next
 ✓ Use the pre-gathered resources effectively
 ✓ Document decisions, but keep moving forward
-✓ Deliver REPORT.md with actual experimental results at the end
+{% if not benchmark_mode %}✓ Deliver REPORT.md with actual experimental results at the end{% endif %}
 
 {{ state_contract }}
 
@@ -308,7 +309,7 @@ Phase 5: Analysis (30-45 min)
 
   → WHEN COMPLETE: Immediately proceed to Phase 6 (Documentation)
 
-Phase 6: Final Documentation (20-30 min) - MANDATORY BEFORE ENDING SESSION
+{% if not benchmark_mode %}Phase 6: Final Documentation (20-30 min) - MANDATORY BEFORE ENDING SESSION
   ✓ Create REPORT.md with ACTUAL experimental results (not placeholder)
   ✓ Create README.md with project overview and key findings
   ✓ Ensure resources.md documents your research process
@@ -324,6 +325,7 @@ CRITICAL REMINDERS:
 - If you encounter issues, document them and continue
 - Even if experiments fail, complete Phase 6 documenting what happened
 - REPORT.md is mandatory - it's the primary deliverable
+{% else %}Final phase: complete and validate every deliverable required by the supplied task.{% endif %}
 
 WORKSPACE DIRECTORY AND DIRECTORY SAFETY:
 ────────────────────────────────────────────────────────────────────────────────
@@ -362,7 +364,7 @@ Remember:
 - All your work stays within this workspace directory
 - Follow the methodology carefully, leveraging the pre-gathered resources
 
-────────────────────────────────────────────────────────────────────────────────
+{% if not benchmark_mode %}────────────────────────────────────────────────────────────────────────────────
 PHASE 6 REQUIREMENTS - WHAT TO INCLUDE IN FINAL DOCUMENTATION
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -406,6 +408,7 @@ IMPORTANT NOTES:
 - If experiments fail or are incomplete, document what you attempted and what happened
 - REPORT.md is the PRIMARY DELIVERABLE - it must contain actual findings
 - These documents make your research accessible and understandable
+{% endif %}
 
 ────────────────────────────────────────────────────────────────────────────────
 SESSION COMPLETION
@@ -415,8 +418,9 @@ The session is COMPLETE when:
 ✓ All phases (1-6) have been attempted
 ✓ Pre-gathered resources have been reviewed and used
 ✓ Experiments were run (even if simple or preliminary)
-✓ REPORT.md has been created documenting actual results
-✓ README.md has been created with overview
+{% if benchmark_mode %}✓ Every deliverable required by the supplied task has been completed and validated
+{% else %}✓ REPORT.md has been created documenting actual results
+✓ README.md has been created with overview{% endif %}
 ✓ Code is organized with comments
 ✓ Results are saved to results/ directory
 

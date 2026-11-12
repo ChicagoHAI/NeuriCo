@@ -70,7 +70,7 @@ WHAT "FULLY-AUTOMATED" MEANS:
 ✓ Complete ALL phases (1-6) in a SINGLE CONTINUOUS SESSION
 ✓ Make reasonable decisions autonomously without waiting for user input
 ✓ Move immediately from one phase to the next
-✓ Deliver REPORT.md with actual mathematical results and a passing AXLE verification
+{% if not benchmark_mode %}✓ Deliver REPORT.md with actual mathematical results and a passing AXLE verification{% endif %}
 
 YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
 
@@ -219,7 +219,7 @@ Phase 5: Refinement and Strengthening (15-25 min)
 ────────────────────────────────────────────────────────────────────────────────
 Phase 6: Final Documentation (20-30 min) — MANDATORY BEFORE ENDING SESSION
 ────────────────────────────────────────────────────────────────────────────────
-  ✓ Create REPORT.md with ACTUAL mathematical results (see structure below)
+{% if not benchmark_mode %}  ✓ Create REPORT.md with ACTUAL mathematical results (see structure below){% endif %}
   ✓ Create README.md with project overview
   ✓ Ensure proofs/ is organized with comments
   ✓ Verify results/ contains verification.md with AXLE status
@@ -231,9 +231,9 @@ CRITICAL REMINDERS:
 - `axle_check.py` is your ground truth — informal argument is not enough
 - A proof with `sorry` is NOT a proof (AXLE reports it COMPLETE-with-warning =
   INCOMPLETE_SORRY); resolve every sorry before reporting completion
-- If a proof is too hard to formalize in time, mark it `sorry`, document the
-  informal argument clearly, and note it as future work in REPORT.md
-- REPORT.md is mandatory even if some proofs remain as `sorry`
+- If a proof is too hard to formalize in time, mark it `sorry` and document the
+  informal argument clearly.{% if not benchmark_mode %} Note it as future work in REPORT.md.{% endif %}
+{% if not benchmark_mode %}- REPORT.md is mandatory even if some proofs remain as `sorry`{% endif %}
 
 ════════════════════════════════════════════════════════════════════════════════
 WORKSPACE DIRECTORY AND DIRECTORY SAFETY
@@ -263,7 +263,7 @@ Remember:
 PHASE 6 REQUIREMENTS — WHAT TO INCLUDE IN FINAL DOCUMENTATION
 ════════════════════════════════════════════════════════════════════════════════
 
-1. REPORT.md — Mathematics (Axiom AXLE) research report:
+{% if not benchmark_mode %}1. REPORT.md — Mathematics (Axiom AXLE) research report:
    - Executive Summary (2-3 paragraphs; state verification status explicitly)
    - Research Question (the conjecture or problem)
    - Definitions and Notation (informal descriptions; Lean types in code blocks)
@@ -275,14 +275,14 @@ PHASE 6 REQUIREMENTS — WHAT TO INCLUDE IN FINAL DOCUMENTATION
    - Discussion (implications, connections, what Mathlib lemmas were reused)
    - Open Questions (results that remain conjectural or unformalized)
    - Conclusions and Future Work
-   - References (papers + Lean/Mathlib + Axiom AXLE environment version info)
+   - References (papers + Lean/Mathlib + Axiom AXLE environment version info){% endif %}
 
 2. README.md — Quick overview:
    - Brief description (2-3 sentences)
    - Key results (bullet points: theorem names + informal statements)
    - Verification: `axle_check.py --dir proofs/` must report COMPLETE
    - File structure overview
-   - Link to REPORT.md
+{% if not benchmark_mode %}   - Link to REPORT.md{% endif %}
 
 ════════════════════════════════════════════════════════════════════════════════
 SESSION COMPLETION
@@ -291,7 +291,7 @@ SESSION COMPLETION
 The session is COMPLETE when:
 ✓ All phases (1-6) have been attempted
 ✓ proofs/ exists and `axle_check.py --dir proofs/` runs (COMPLETE if proofs done)
-✓ REPORT.md documents actual results and verification status
+{% if not benchmark_mode %}✓ REPORT.md documents actual results and verification status{% endif %}
 ✓ README.md is created
 ✓ results/verification.md records the AXLE status and environment
 ✓ src/ contains Python exploration scripts with comments

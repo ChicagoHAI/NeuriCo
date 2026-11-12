@@ -183,6 +183,14 @@ def test_autoresearch_and_unfocused_ordinary_keep_their_existing_prompt_branches
         scoring_enabled=True,
         hitl_phase="execution",
     )
+    autoresearch_benchmark_prompt = autoresearch._hitl_experiment_runner_source_prompt(
+        idea=IDEA,
+        provider="codex",
+        use_scribe=False,
+        scoring_enabled=True,
+        hitl_phase="execution",
+        benchmark_mode=True,
+    )
     ordinary_prompt = _ordinary(tmp_path / "ordinary", False)._hitl_experiment_runner_source_prompt(
         idea=IDEA,
         provider="codex",
@@ -192,6 +200,7 @@ def test_autoresearch_and_unfocused_ordinary_keep_their_existing_prompt_branches
     )
 
     assert "FOCUSED HITL AUTORESEARCH SCOPE" in autoresearch_prompt
+    assert autoresearch_benchmark_prompt == autoresearch_prompt
     assert "selected direction" in autoresearch_prompt.lower()
     assert "FOCUSED MANAGED ORDINARY RESEARCH" not in autoresearch_prompt
     assert "FOCUSED MANAGED ORDINARY RESEARCH" not in ordinary_prompt

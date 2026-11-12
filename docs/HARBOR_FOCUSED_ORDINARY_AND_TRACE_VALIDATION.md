@@ -25,3 +25,24 @@ Result: **88 passed, 7 skipped**. Skips are the Linux process-supervision tests,
 reserved for checkpoint 8. The first restricted run could not execute `ps` in
 one cancellation test; rerunning with local process inspection enabled passed.
 No model calls were made. `git diff --check` passed.
+
+## Checkpoint 2: managed benchmark deliverables
+
+Propagated `benchmark_mode` into the managed experiment path, its expected
+outputs, completion validator, and execution prompt. The exemption applies to
+unscored ordinary benchmark execution; scored contracts and AutoResearch
+instructions remain unchanged. Task-requested reports remain in the full task
+instruction. Existing planning/review phases are unchanged.
+
+Validation (2026-11-12):
+
+```sh
+integrations/harbor/.venv/bin/python -m pytest \
+  tests/test_managed_ordinary_report.py tests/test_focused_managed_ordinary.py \
+  tests/test_managed_task_context.py tests/test_hitl_required_artifacts.py -q
+```
+
+Result: **109 passed**. Includes pipeline flag propagation, complete rendered
+execution instructions for six domains, task-requested reports, ordinary report
+validation, scored artifact contracts, and AutoResearch prompt equality with the
+benchmark flag on/off. `git diff --check` passed. No model calls were made.

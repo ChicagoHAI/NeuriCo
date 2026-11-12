@@ -418,25 +418,32 @@ AFTER COMPLETING PHASE 3: IMMEDIATELY BEGIN PHASE 4
   and approved plan.{% elif focused_autoresearch %}✓ Verify your analysis is complete, using statistical tests where appropriate
   and visualizations when they help interpret results or diagnose problems.{% else %}✓ Verify your analysis is complete with statistical tests and visualizations{% endif %}
 
+{% if not benchmark_mode %}
 ✓ NOW PROCEED to documentation - this is the final phase
 ✓ Document all your findings, methodology, and results in REPORT.md
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE 4: DOCUMENTATION
+{% if benchmark_mode %}OPTIONAL REPORT FORMAT WHEN THE SUPPLIED TASK REQUIRES A REPORT
+{% else %}PHASE 4: DOCUMENTATION{% endif %}
 ─────────────────────────────────────────────────────────────────────────────
 
-Create comprehensive documentation that allows others (and your future self)
-to understand and reproduce your work.
+{% if benchmark_mode %}If the supplied task requires a report, the following structure can help organize it.
+The supplied task remains authoritative about required deliverables.
+{% else %}Create comprehensive documentation that allows others (and your future self)
+to understand and reproduce your work.{% endif %}
 
 NOTE: Use Jupyter notebooks for running experiments and showing code/output.
 Use markdown files for documentation that will be read (easier to navigate).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-DELIVERABLE 1: REPORT.md
+{% if benchmark_mode %}REPORT FORMAT GUIDANCE
+{% else %}DELIVERABLE 1: REPORT.md{% endif %}
 
-{% if focused_managed_ordinary %}This is a comprehensive technical record of the solution, the work performed,
+{% if benchmark_mode %}Use relevant sections from this outline when a report is required.
+{% elif focused_managed_ordinary %}This is a comprehensive technical record of the solution, the work performed,
 supporting evidence, and limitations. Include these sections:{% elif focused_autoresearch %}This is a comprehensive technical record of the selected directions.
 Include these sections:{% else %}This is the primary research report. Include these sections:{% endif %}
 
@@ -594,7 +601,8 @@ Common issues and solutions
 AFTER COMPLETING PHASE 4: IMMEDIATELY BEGIN PHASE 5
 ─────────────────────────────────────────────────────────────────────────────
 
-✓ Verify REPORT.md and README.md are complete with actual results
+{% if benchmark_mode %}✓ Verify the task-required deliverables are complete and supported by actual results
+{% else %}✓ Verify REPORT.md and README.md are complete with actual results{% endif %}
 ✓ NOW PROCEED to final validation - the last step before completion
 ✓ Validate everything is reproducible and scientifically sound
 
@@ -641,7 +649,8 @@ AFTER COMPLETING PHASE 5: RESEARCH SESSION IS COMPLETE
 ─────────────────────────────────────────────────────────────────────────────
 
 ✓ All phases (1-5) have been completed
-✓ REPORT.md contains actual experimental results
+{% if benchmark_mode %}✓ The task-required deliverables contain the completed solution
+{% else %}✓ REPORT.md contains actual experimental results{% endif %}
 ✓ All validation checks have passed
 ✓ The research session is now finished
 

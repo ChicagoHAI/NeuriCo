@@ -65,7 +65,7 @@ REQUIRED STEPS (in order):
    - 'uv add --project {{ research_env_dir }}' updates {{ research_project_path }} automatically
    - Verify with: cat {{ research_project_path }}
    - If you used uv pip: uv pip freeze --python {{ research_python_path }} > {{ research_requirements_path }}
-   - Document non-Python tool versions explicitly in REPORT.md
+   - Document non-Python tool versions explicitly{% if not benchmark_mode %} in REPORT.md{% endif %}
 
 WHY: Using an isolated environment ensures:
 - No pollution of the neurico environment
@@ -117,7 +117,7 @@ WHAT "FULLY-AUTOMATED" MEANS:
 ✓ Move immediately from one phase to the next
 ✓ Use the pre-gathered resources effectively
 ✓ Document decisions, but keep moving forward
-✓ Deliver REPORT.md with actual results at the end
+{% if not benchmark_mode %}✓ Deliver REPORT.md with actual results at the end{% endif %}
 
 YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
 This prompt contains everything you need. Execute it completely from start to finish.
@@ -152,7 +152,7 @@ named near-future facility.
 
 IF YOUR ANALYSIS REQUIRES FULL NLO OR GEANT4:
   - Use LO + Delphes for the main scan; note NLO K-factors from literature where available
-  - Note the approximation explicitly in REPORT.md
+  - Note the approximation explicitly{% if not benchmark_mode %} in REPORT.md{% endif %}
   - Document an HPC plan (run cards, expected resources) rather than running it here
 
 TOOLS TO PRIORITIZE:
@@ -278,7 +278,7 @@ Phase 4: Parameter-Space Scan and Constraint Checking (45-90 min)
          introduce a cancellation; pick ONE targeted modification
       3. Document the exclusion and the fix, re-scan with the modified model
       4. If still fully excluded after ONE modification attempt, STOP the scan,
-         document the result cleanly in REPORT.md as "null result — this direction
+         document the result cleanly{% if not benchmark_mode %} in REPORT.md{% endif %} as "null result — this direction
          is excluded by [constraint X]", and proceed to Phase 5 anyway. A clear
          null result is a valid outcome.
 
@@ -313,7 +313,7 @@ Phase 5: Analysis, Projection, and Comparison with Prior Art (30-60 min)
   → WHEN COMPLETE: Immediately proceed to Phase 6 (Documentation)
 
 Phase 6: Final Documentation (20-40 min) - MANDATORY BEFORE ENDING SESSION
-  ✓ Create REPORT.md with ACTUAL results using this BSM-specific structure:
+{% if not benchmark_mode %}  ✓ Create REPORT.md with ACTUAL results using this BSM-specific structure:
     1. Executive Summary — SM problem, model in one sentence, key prediction, target facility
     2. Motivation & Prior Art — why the SM problem matters; the landscape of BSM responses; this model's specific gap
     3. Model Definition — gauge group, particle content table with quantum numbers, Lagrangian, free parameters and ranges
@@ -323,11 +323,11 @@ Phase 6: Final Documentation (20-40 min) - MANDATORY BEFORE ENDING SESSION
     7. Projections at the Target Facility — analysis setup, signal, background, significance vs. luminosity, discovery / exclusion reach
     8. Complementarity and Discussion — how other facilities test the same model; caveats and limitations
     9. Reproducibility — FeynRules source (if new), UFO location, MadGraph run cards, analysis scripts, all in the workspace
-    10. References — every paper and experimental result cited, with INSPIRE / arXiv IDs
+    10. References — every paper and experimental result cited, with INSPIRE / arXiv IDs{% endif %}
   ✓ Create README.md with project overview and headline findings
   ✓ If the model was excluded, document this clearly — a null result is still valuable output
   ✓ Ensure code is clean and commented; scan pipeline should be re-runnable
-  ✓ Verify workspace structure: plan.md, literature_review.md, constraints.md, resources.md, REPORT.md, README.md, results/, experiments/, models/, papers/, datasets/
+  ✓ Verify the task-required workspace structure and generated artifacts
 
   → WHEN COMPLETE: Session is finished
 
@@ -336,8 +336,8 @@ CRITICAL REMINDERS:
 - Resources have been PRE-GATHERED for you — use them!
 - Never stop between phases waiting for user input
 - If you encounter issues, document them and continue
-- Even if the scan fully excludes the model, complete Phase 6 with a clear null-result REPORT.md
-- REPORT.md is mandatory — it's the primary deliverable
+{% if not benchmark_mode %}- Even if the scan fully excludes the model, complete Phase 6 with a clear null-result REPORT.md
+- REPORT.md is mandatory — it's the primary deliverable{% endif %}
 - A clean excluded-model result is more useful than a handwavy proposal
 
 WORKSPACE DIRECTORY AND DIRECTORY SAFETY:
@@ -382,16 +382,16 @@ PHASE 6 REQUIREMENTS - WHAT TO INCLUDE IN FINAL DOCUMENTATION
 
 When you reach Phase 6, create these files with ACTUAL results from your scan:
 
-1. REPORT.md — BSM research report with the 10-section structure above. Include key
+{% if not benchmark_mode %}1. REPORT.md — BSM research report with the 10-section structure above. Include key
    plots inline (markdown image embeds), the constraint-summary table, and the
-   benchmark-point table. Quote numerical values with units and uncertainties.
+   benchmark-point table. Quote numerical values with units and uncertainties.{% endif %}
 
 2. README.md — Quick overview:
    - 2-3 sentence description (model, SM problem it targets, key prediction)
    - 3-5 bullet-point headline findings (or the null result)
    - Reproduction instructions (environment, how to re-run the scan)
    - File-structure overview
-   - Link to REPORT.md
+{% if not benchmark_mode %}   - Link to REPORT.md{% endif %}
 
 3. If applicable, a model-card file models/model_card.md documenting:
    - Full Lagrangian
@@ -402,7 +402,7 @@ When you reach Phase 6, create these files with ACTUAL results from your scan:
 IMPORTANT NOTES:
 - Do NOT create placeholder stub reports during planning — wait until Phase 6
 - If the scan fails or the model is excluded, document this clearly and completely
-- REPORT.md is the PRIMARY DELIVERABLE — it must contain actual findings
+{% if not benchmark_mode %}- REPORT.md is the PRIMARY DELIVERABLE — it must contain actual findings{% endif %}
 - A clean null result is a valid and valuable output; don't fabricate a positive result
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -415,7 +415,7 @@ The session is COMPLETE when:
 ✓ A BSM model has been specified, scanned, and compared against all relevant constraints
 ✓ If any points survive: benchmark points and future-facility projections have been produced
 ✓ If no points survive: a clean null-result analysis has been produced
-✓ REPORT.md has been created documenting actual results
+{% if not benchmark_mode %}✓ REPORT.md has been created documenting actual results{% endif %}
 ✓ README.md has been created with overview
 ✓ Code is organized with comments
 ✓ Results are saved to results/ directory

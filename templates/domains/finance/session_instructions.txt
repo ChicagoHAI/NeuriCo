@@ -201,7 +201,7 @@ WHAT "FULLY-AUTOMATED" MEANS:
 ✓ Move immediately from one phase to the next
 ✓ Use the pre-gathered resources effectively
 ✓ Document decisions, but keep moving forward
-✓ Deliver REPORT.md with actual empirical results at the end
+{% if not benchmark_mode %}✓ Deliver REPORT.md with actual empirical results at the end{% endif %}
 
 YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
 This prompt contains everything you need. Execute it completely from start to finish.
@@ -304,7 +304,7 @@ Phase 6: Tables, Figures, and Output (20-30 min)
   → WHEN COMPLETE: Immediately proceed to Phase 7 (Documentation)
 
 Phase 7: Final Documentation (20-30 min) - MANDATORY BEFORE ENDING SESSION
-  ✓ Create REPORT.md with ACTUAL empirical results (not placeholders)
+{% if not benchmark_mode %}  ✓ Create REPORT.md with ACTUAL empirical results (not placeholders){% endif %}
   ✓ Create README.md with project overview and key findings
   ✓ Ensure all code is documented and reproducible
   ✓ List all data requirements and access instructions
@@ -317,7 +317,7 @@ CRITICAL REMINDERS:
 - Never stop between phases waiting for user input
 - If you encounter data issues, document and work around them
 - Even if some analyses fail, complete Phase 7 documenting what you achieved
-- REPORT.md is mandatory — it's the primary deliverable
+{% if not benchmark_mode %}- REPORT.md is mandatory — it's the primary deliverable{% endif %}
 
 WORKSPACE DIRECTORY AND DIRECTORY SAFETY:
 ────────────────────────────────────────────────────────────────────────────────
@@ -356,7 +356,7 @@ PHASE 7 REQUIREMENTS - WHAT TO INCLUDE IN FINAL DOCUMENTATION
 
 When you reach Phase 7, create these files with ACTUAL results from your work:
 
-1. REPORT.md - Comprehensive empirical finance research report containing:
+{% if not benchmark_mode %}1. REPORT.md - Comprehensive empirical finance research report containing:
    - Executive Summary (2-3 paragraphs: question, approach, key findings)
    - Research Question (the economic question investigated)
    - Data (sources, sample construction, summary statistics)
@@ -367,7 +367,7 @@ When you reach Phase 7, create these files with ACTUAL results from your work:
    - Conclusions (summary, policy implications, future directions)
    - References (papers, data sources, tools used)
 
-   Include key tables and figures inline (as markdown or LaTeX).
+   Include key tables and figures inline (as markdown or LaTeX).{% endif %}
 
 2. README.md - Quick overview containing:
    - Brief project description (2-3 sentences)
@@ -375,14 +375,14 @@ When you reach Phase 7, create these files with ACTUAL results from your work:
    - Data requirements and access instructions
    - How to reproduce the analysis
    - File structure overview
-   - Link to REPORT.md for full details
+{% if not benchmark_mode %}   - Link to REPORT.md for full details{% endif %}
 
    Keep this concise and scannable.
 
 IMPORTANT NOTES:
 - Do NOT create placeholder/stub reports during planning - wait until Phase 7
 - If some analyses fail, document what you achieved and what remains
-- REPORT.md is the PRIMARY DELIVERABLE - it must contain actual results
+{% if not benchmark_mode %}- REPORT.md is the PRIMARY DELIVERABLE - it must contain actual results{% endif %}
 - Include economic magnitudes for all key findings
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -395,7 +395,7 @@ The session is COMPLETE when:
 ✓ Data has been cleaned and variables constructed
 ✓ Main estimation has been run
 ✓ At least some robustness checks have been performed
-✓ REPORT.md has been created documenting actual empirical results
+{% if not benchmark_mode %}✓ REPORT.md has been created documenting actual empirical results{% endif %}
 ✓ README.md has been created with overview
 ✓ Code is organized with comments (Stata .do files and/or Python scripts)
 ✓ Tables and figures are saved to organized directories

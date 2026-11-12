@@ -119,7 +119,7 @@ WHAT "FULLY-AUTOMATED" MEANS:
 ✓ Move immediately from one phase to the next
 ✓ Use the pre-gathered resources effectively
 ✓ Document decisions, but keep moving forward
-✓ Deliver REPORT.md with actual mathematical results at the end
+{% if not benchmark_mode %}✓ Deliver REPORT.md with actual mathematical results at the end{% endif %}
 
 YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
 This prompt contains everything you need. Execute it completely from start to finish.
@@ -229,7 +229,7 @@ Phase 5: Refinement and Strengthening (20-30 min)
   → WHEN COMPLETE: Immediately proceed to Phase 6 (Documentation)
 
 Phase 6: Final Documentation (20-30 min) - MANDATORY BEFORE ENDING SESSION
-  ✓ Create REPORT.md with ACTUAL mathematical results (not placeholder)
+{% if not benchmark_mode %}  ✓ Create REPORT.md with ACTUAL mathematical results (not placeholder){% endif %}
   ✓ Create README.md with project overview and key results
   ✓ Ensure all proofs are complete and clearly written
   ✓ Verify computational code has clear comments
@@ -243,7 +243,7 @@ CRITICAL REMINDERS:
 - Never stop between phases waiting for user input
 - If you encounter difficulties in a proof, document the obstacle and try alternative approaches
 - Even if proofs are incomplete, complete Phase 6 documenting what you achieved and what remains
-- REPORT.md is mandatory - it's the primary deliverable
+{% if not benchmark_mode %}- REPORT.md is mandatory - it's the primary deliverable{% endif %}
 
 WORKSPACE DIRECTORY AND DIRECTORY SAFETY:
 ────────────────────────────────────────────────────────────────────────────────
@@ -287,7 +287,7 @@ PHASE 6 REQUIREMENTS - WHAT TO INCLUDE IN FINAL DOCUMENTATION
 
 When you reach Phase 6, create these files with ACTUAL results from your work:
 
-1. REPORT.md - Comprehensive mathematical research report containing:
+{% if not benchmark_mode %}1. REPORT.md - Comprehensive mathematical research report containing:
    - Executive Summary (2-3 paragraphs summarizing what you proved/discovered)
    - Research Question (the conjecture or problem investigated)
    - Definitions and Notation (all definitions used, precisely stated)
@@ -299,21 +299,21 @@ When you reach Phase 6, create these files with ACTUAL results from your work:
    - Conclusions (summary of contributions and future directions)
    - References (papers, textbooks, tools used)
 
-   Include key computational results inline (as markdown).
+   Include key computational results inline (as markdown).{% endif %}
 
 2. README.md - Quick overview containing:
    - Brief project description (2-3 sentences)
    - Key results summary (bullet points: main theorems proved)
    - How to reproduce computational verification
    - File structure overview
-   - Link to REPORT.md for full details
+{% if not benchmark_mode %}   - Link to REPORT.md for full details{% endif %}
 
    Keep this concise and scannable.
 
 IMPORTANT NOTES:
 - Do NOT create placeholder/stub reports during planning - wait until Phase 6
 - If proofs are incomplete, document what you achieved and what remains
-- REPORT.md is the PRIMARY DELIVERABLE - it must contain actual mathematical results
+{% if not benchmark_mode %}- REPORT.md is the PRIMARY DELIVERABLE - it must contain actual mathematical results{% endif %}
 - Proofs must be logically complete (no "clearly" or "obviously" hiding real work)
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -325,7 +325,7 @@ The session is COMPLETE when:
 ✓ Pre-gathered resources have been reviewed and used
 ✓ Proof construction was attempted (even if some proofs are incomplete)
 ✓ Computational verification was performed where applicable
-✓ REPORT.md has been created documenting actual mathematical results
+{% if not benchmark_mode %}✓ REPORT.md has been created documenting actual mathematical results{% endif %}
 ✓ README.md has been created with overview
 ✓ Code is organized with comments (if computational tools were used)
 ✓ Results are saved to results/ directory
