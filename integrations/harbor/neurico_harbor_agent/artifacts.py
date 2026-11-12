@@ -41,6 +41,21 @@ _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _FIELD_TOKEN = re.compile(r"[a-z0-9]+")
 _ACRONYM_FIELD_BOUNDARY = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _CAMEL_FIELD_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
+_SENSITIVE_FIELD_TOKEN_PAIRS = frozenset(
+    {
+        ("access", "key"),
+        ("access", "token"),
+        ("api", "key"),
+        ("auth", "token"),
+        ("client", "secret"),
+        ("connection", "string"),
+        ("private", "key"),
+        ("refresh", "token"),
+        ("secret", "key"),
+        ("session", "token"),
+    }
+)
+_SENSITIVE_COMPACT_FIELD_NAMES = frozenset("".join(parts) for parts in _SENSITIVE_FIELD_TOKEN_PAIRS)
 _LINE_ASSIGNMENT = re.compile(
     r"^(?P<prefix>[ \t]*(?:-[ \t]*)?(?P<quote>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)"
     r"(?P=quote)[ \t]*[:=][ \t]*)(?P<value>[^\r\n]*)(?P<newline>\r?\n|$)"
@@ -636,6 +651,8 @@ def _is_sensitive_field_name(field_name: str) -> bool:
     if not tokens:
         return False
     token_set = set(tokens)
+    if len(tokens) == 1 and tokens[0] in _SENSITIVE_COMPACT_FIELD_NAMES:
+        return True
     if token_set & {"authorization", "cookie", "credential", "credentials", "password", "passwd"}:
         return True
     if "secret" in token_set:
@@ -643,15 +660,7 @@ def _is_sensitive_field_name(field_name: str) -> bool:
     if "auth" in token_set or tokens == ("dsn",) or tokens == ("key",) or tokens == ("pat",):
         return True
     adjacent_pairs = set(zip(tokens, tokens[1:]))
-    if adjacent_pairs & {
-        ("access", "key"),
-        ("api", "key"),
-        ("client", "secret"),
-        ("connection", "string"),
-        ("private", "key"),
-        ("refresh", "token"),
-        ("session", "token"),
-    }:
+    if adjacent_pairs & _SENSITIVE_FIELD_TOKEN_PAIRS:
         return True
     if "token" in token_set or "tokens" in token_set:
         non_secret_token_metadata = {

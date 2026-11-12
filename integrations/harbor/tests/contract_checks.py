@@ -262,9 +262,25 @@ def test_trace_redactor_covers_unlabelled_secret_forms() -> None:
             ".log",
             "opaque-pascal-aws-value",
         ),
+        ('{"apikey":"opaque-compact-api-value"}\n', ".json", "opaque-compact-api-value"),
+        (
+            '{"accesstoken":"opaque-compact-access-value"}\n',
+            ".jsonl",
+            "opaque-compact-access-value",
+        ),
+        (
+            "clientsecret: opaque-compact-client-value\n",
+            ".yaml",
+            "opaque-compact-client-value",
+        ),
+        (
+            "privatekey=opaque-compact-private-value\n",
+            ".log",
+            "opaque-compact-private-value",
+        ),
     ],
 )
-def test_trace_redactor_covers_camel_case_sensitive_fields(
+def test_trace_redactor_covers_common_sensitive_field_styles(
     payload: str,
     suffix: str,
     secret: str,
@@ -281,8 +297,8 @@ def test_trace_redactor_covers_camel_case_sensitive_fields(
     assert "REDACTED_SECRET_FIELD" in rendered
 
 
-def test_camel_case_token_metadata_remains_public() -> None:
-    payload = '{"tokenCount":17,"tokenBudget":100}\n'
+def test_token_metadata_fields_remain_public() -> None:
+    payload = '{"tokenCount":17,"tokenBudget":100,"tokencount":23}\n'
     safe_payload = artifacts_module._safe_text_payload(
         payload.encode("utf-8"),
         ".json",
@@ -291,7 +307,7 @@ def test_camel_case_token_metadata_remains_public() -> None:
 
     assert safe_payload is not None
     rendered = json.loads(safe_payload[0])
-    assert rendered == {"tokenBudget": 100, "tokenCount": 17}
+    assert rendered == {"tokenBudget": 100, "tokenCount": 17, "tokencount": 23}
 
 
 def test_trace_redactor_covers_short_configured_secrets_and_fails_closed_below_limit() -> None:
