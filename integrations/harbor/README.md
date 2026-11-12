@@ -66,9 +66,11 @@ independently and do not prevent normal cancellation, restoration or completion.
 
 The manifest relates emitted provider session IDs to retained native records;
 missing records and interrupted calls are explicit gaps. An early provider
-failure does not require a session that never started. Linux lifecycle and live
-Harbor/gapbench validation are still pending; end-to-end readiness is not yet
-claimed.
+failure does not require a session that never started. Linux and real no-model Harbor lifecycle checks pass. Harbor 0.25.0
+requires the ACP client and cancellation compatibility patches documented in
+gapbench to forward hard-timeout cancellation before collecting logs. The live
+two-frame Harbor/gapbench pilot is still in progress; end-to-end readiness is
+not yet claimed.
 
 ## Contract
 

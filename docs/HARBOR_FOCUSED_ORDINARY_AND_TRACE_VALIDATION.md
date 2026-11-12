@@ -208,3 +208,12 @@ commit without changing Git's transport restrictions or global TLS settings.
 Actual provider settings in these fixtures are synthetic; the separate live
 pilot must validate genuine provider records. The fixture runner intentionally
 fails if any archive is incomplete, including the reproduced timeout case.
+
+## Timeout boundary verified after resume
+
+With gapbench's Harbor cancellation compatibility patch, the real timeout
+fixture retains a complete finalized archive (19 files, two invocations; all
+hashes/sizes verified) after cleanup. Harbor still reports the official
+10-second `AgentTimeoutError` and reward 0. The success, failed-child and
+public-export-failure cases also pass. The separate two-frame live pilot has
+now started; no final integration completion claim is made yet.
