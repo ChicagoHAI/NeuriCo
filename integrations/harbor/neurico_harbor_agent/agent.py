@@ -46,6 +46,7 @@ from .runtime import (
     CodexInferenceConnection,
     HarborAutoResearchTask,
     HarborWorkflow,
+    ReasoningEffort,
     build_autoresearch_environment,
 )
 from .artifacts import (
@@ -67,6 +68,7 @@ from .scratch import (
     EphemeralRunScratch,
     PrivateOutputSpool,
 )
+from .codex_bootstrap import CODEX_VERSION
 
 ContentBlock = (
     TextContentBlock
@@ -125,6 +127,13 @@ def _autoresearch_iterations(environment: dict[str, str]) -> int:
     if iterations < 1:
         raise ValueError("NEURICO_HARBOR_AUTORESEARCH_ITERATIONS must be at least 1")
     return iterations
+
+
+def _reasoning_effort(environment: dict[str, str]) -> ReasoningEffort | None:
+    raw = environment.get("NEURICO_HARBOR_REASONING_EFFORT")
+    if raw is not None and raw not in {"low", "medium", "high", "xhigh"}:
+        raise ValueError("NEURICO_HARBOR_REASONING_EFFORT must be low, medium, high, or xhigh")
+    return raw
 
 
 def _autoresearch_time_limit(environment: dict[str, str]) -> int | None:
@@ -378,6 +387,7 @@ async def run_autoresearch_process(
     register_process: Callable[[asyncio.subprocess.Process], bool],
     cancellation_requested: Callable[[], bool] | None = None,
     workflow: HarborWorkflow = "autoresearch",
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> int:
     """Supervise managed research and finalize its trace after the child stops."""
     started_at = datetime.now(timezone.utc).isoformat()
@@ -392,6 +402,9 @@ async def run_autoresearch_process(
         "run_id": run_id,
         "provider": "codex",
         "requested_model": connection.requested_model,
+        "configured_model": connection.backend_model,
+        "requested_reasoning_effort": reasoning_effort,
+        "requested_codex_version": CODEX_VERSION,
         "hitl_mode": "auto",
         "scoring_enabled": workflow == "autoresearch",
         "benchmark_mode": True,
@@ -459,6 +472,7 @@ async def run_autoresearch_process(
                 connection,
                 ideas_dir=ideas_dir,
                 codex_home=codex_home,
+                reasoning_effort=reasoning_effort,
             )
 
             command = [
@@ -743,6 +757,7 @@ class NeuricoHarborAgent(Agent):
             requested_model=session.model,
         )
         workflow = _harbor_workflow(self._environment)
+        reasoning_effort = _reasoning_effort(self._environment)
         iterations = (
             _autoresearch_iterations(self._environment) if workflow == "autoresearch" else None
         )
@@ -762,6 +777,7 @@ class NeuricoHarborAgent(Agent):
                 connection=connection,
                 base_environment=self._environment,
                 workflow=workflow,
+                reasoning_effort=reasoning_effort,
                 iterations=iterations,
                 time_limit_seconds=time_limit_seconds,
                 run_id=f"{session_id}-{uuid4().hex}",

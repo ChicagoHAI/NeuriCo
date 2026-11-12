@@ -16,6 +16,7 @@ from typing import Any, Literal
 from src.cli.submit_local import _convert_without_llm
 
 HarborWorkflow = Literal["autoresearch", "focused-managed-ordinary"]
+ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,9 @@ class CodexInferenceConnection:
             return model
         return self.requested_model
 
-    def prepare_codex_home(self, codex_home: Path) -> dict[str, str]:
+    def prepare_codex_home(
+        self, codex_home: Path, *, reasoning_effort: ReasoningEffort | None = None
+    ) -> dict[str, str]:
         """Create an isolated Codex home and return its secret environment."""
         codex_home.mkdir(parents=True, exist_ok=False)
         codex_home.chmod(0o700)
@@ -114,7 +117,11 @@ class CodexInferenceConnection:
         config_lines = [
             f"model = {json.dumps(self.backend_model)}",
             'cli_auth_credentials_store = "file"',
+            # Task-image login profiles can discard the managed worker's tool PATH.
+            "allow_login_shell = false",
         ]
+        if reasoning_effort is not None:
+            config_lines.append(f"model_reasoning_effort = {json.dumps(reasoning_effort)}")
         secret_environment: dict[str, str] = {}
         if self.mode == "openai-api":
             config_lines.extend(
@@ -248,10 +255,14 @@ def build_autoresearch_environment(
     *,
     ideas_dir: Path,
     codex_home: Path,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> dict[str, str]:
     """Build the environment inherited by NeuriCo and all Codex agents."""
     environment = dict(base_environment)
-    environment.update(connection.prepare_codex_home(codex_home))
+    environment.update(connection.prepare_codex_home(codex_home, reasoning_effort=reasoning_effort))
+    # Reuse the native worker override so an inherited host setting cannot
+    # supersede Harbor's model. The manager inherits the isolated Codex config.
+    environment["NEURICO_AGENT_MODEL"] = connection.backend_model
     environment["CODEX_HOME"] = str(codex_home)
     environment["NEURICO_IDEAS"] = str(ideas_dir)
     environment["PYTHONUNBUFFERED"] = "1"

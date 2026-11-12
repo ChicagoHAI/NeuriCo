@@ -46,3 +46,29 @@ Result: **109 passed**. Includes pipeline flag propagation, complete rendered
 execution instructions for six domains, task-requested reports, ordinary report
 validation, scored artifact contracts, and AutoResearch prompt equality with the
 benchmark flag on/off. `git diff --check` passed. No model calls were made.
+
+## Checkpoint 3: provider configuration
+
+Ported the tested `allow_login_shell = false` setting and optional validated
+reasoning effort. Set the existing worker model override to Harbor's backend
+model, preventing an inherited host override from superseding the task model.
+The native manager keeps using the same isolated Codex home. Recorded requested
+version/model/effort separately; observed settings will come from retained
+provider records in the collection checkpoint, not from configuration guesses.
+
+Validated Codex **0.167.1** using the adapter launcher with a temporary local
+cache (`--version` reported `codex-cli 0.167.1`). The pinned CLI successfully
+parsed the generated model/high-effort/non-login-shell configuration using
+`features list`; no inference or login change was performed.
+
+```sh
+integrations/harbor/.venv/bin/python -m pytest \
+  integrations/harbor/tests/contract_checks.py \
+  integrations/harbor/tests/workflow_checks.py \
+  integrations/harbor/tests/provider_checks.py -q
+```
+
+Result: **98 passed, 7 Linux-only skipped**. Checks include actual native manager
+command/environment construction, native worker model/environment construction,
+authentication source immutability, optional/default effort and invalid values.
+`git diff --check` passed.

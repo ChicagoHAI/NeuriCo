@@ -25,6 +25,14 @@ AutoResearch artifact validation retain their existing contracts.
 by focused managed ordinary. Harbor's configured task timeout still applies to
 both workflows. Both reuse the existing supervisor and native cooperative stop.
 
+`NEURICO_HARBOR_REASONING_EFFORT` optionally selects `low`, `medium`, `high`,
+or `xhigh` in the shared isolated Codex configuration. Omit it to keep Codex's
+default. The study uses `high`. Login shells are disabled so task-image shell
+profiles do not remove the managed tools from `PATH`. Harbor's requested model
+also sets NeuriCo's existing worker model override; the manager inherits the
+same isolated Codex configuration. Requested settings are recorded separately
+from observations in provider traces.
+
 ## Contract
 
 - The ACP `cwd` becomes the idea's `metadata.local_workspace`. The adapter
@@ -226,7 +234,7 @@ both workflows. Both reuse the existing supervisor and native cooperative stop.
 
 The Python source runtime exposes a locked `codex` launcher. It uses an already
 available Codex CLI only when its version exactly matches the adapter pin;
-otherwise it installs `@openai/codex@0.147.0` into the execution user's cache.
+otherwise it installs `@openai/codex@0.167.1` into the execution user's cache.
 This mirrors Harbor's own Codex-agent installation strategy while keeping the
 NeuriCo source manifest compatible with Harbor's `python-uv` runtime. The
 launcher also ensures that Git, which AutoResearch needs for local checkpoints,
