@@ -350,7 +350,9 @@ def test_rejected_text_records_check_without_payload(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_sanitize_trace_text", lambda *a, **k: "secret-value")
     archive.copy_file(source, Path("context.jsonl"), "research")
     assert archive.gaps == [{"source": "context.jsonl", "reason":
-                             "text_sanitization_rejected:secret_value_remaining"}]
+                             "text_sanitization_rejected:secret_value_remaining"},
+                            {"source": "context.jsonl", "reason":
+                             "secret_value_remaining@sanitized-line-1"}]
     assert "secret-value" not in json.dumps(archive.gaps)
     assert not (archive.directory / "context.jsonl").exists()
 
@@ -362,3 +364,12 @@ def test_binary_rejection_has_specific_safe_reason(tmp_path):
     archive.copy_file(source, Path("output.bin"), "research")
     assert archive.gaps == [{"source": "output.bin", "reason": "binary_credential_detected"}]
     assert not (archive.directory / "output.bin").exists()
+
+
+def test_rejection_locations_do_not_disclose_keys_or_values():
+    from neurico_harbor_agent.internal_traces import _rejection_locations
+    text = '{}\n' + json.dumps({"private-key-name": ["fine", "secret-value"]})
+    locations = _rejection_locations(text, lambda value: "secret-value" in value)
+    assert locations == ["sanitized-line-2/member-0/value/item-1"]
+    assert "private-key-name" not in str(locations)
+    assert "secret-value" not in str(locations)

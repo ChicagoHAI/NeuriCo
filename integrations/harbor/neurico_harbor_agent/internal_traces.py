@@ -45,6 +45,38 @@ def private_trace_redactor(environment, *, credential_file=None, additional_valu
                                       additional_values=additional_values)
 
 
+def _rejection_locations(content: str, check) -> list[str]:
+    """Locate failed checks without retaining text, field names, or credentials.
+
+    Member indexes follow JSON insertion order; coordinates refer to sanitized
+    text, not the original source. Fall back to a line for non-JSON content.
+    """
+    def locate(value, path):
+        found = []
+        if isinstance(value, dict):
+            for index, (key, item) in enumerate(value.items()):
+                if check(key):
+                    found.append(f"{path}/member-{index}/key")
+                found.extend(locate(item, f"{path}/member-{index}/value"))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                found.extend(locate(item, f"{path}/item-{index}"))
+        elif isinstance(value, str) and check(value):
+            found.append(path)
+        return found
+
+    locations = []
+    for number, line in enumerate(content.splitlines(), 1):
+        if not check(line):
+            continue
+        path = f"sanitized-line-{number}"
+        try:
+            locations.extend(locate(json.loads(line), path) or [path])
+        except ValueError:
+            locations.append(path)
+    return locations or ["sanitized-file"]
+
+
 class InternalTraceArchive:
     """One persistent private directory; failed collection never resets it."""
 
@@ -174,6 +206,13 @@ class InternalTraceArchive:
                         if _contains_unredacted_sensitive_material(clean):
                             checks.append("sensitive_material_remaining")
                         self.gap(relative.as_posix(), "text_sanitization_rejected:" + ",".join(checks))
+                        for name, check in (
+                            ("secret_value_remaining", self.redactor.contains_secret),
+                            ("sensitive_material_remaining", _contains_unredacted_sensitive_material),
+                        ):
+                            if name in checks:
+                                for location in _rejection_locations(clean, check):
+                                    self.gap(relative.as_posix(), f"{name}@{location}")
                         return
                     payload, sanitized = safe
                 else:
