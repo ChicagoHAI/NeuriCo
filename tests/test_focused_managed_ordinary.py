@@ -168,11 +168,13 @@ def test_focused_ordinary_experiment_prompts_are_solution_oriented_and_unscored(
     ]
     assert "Why You Expect This Solution to Best Address the Task" in prompts["execution"]
     assert "DIRECTION BUDGET" not in prompts["execution"]
-    for prompt in prompts.values():
-        assert prompt.count("Provide your best-supported answer in the required format") == 1
-        assert "For final delivery, within the task's requirements" in prompt
-        assert "the plausible alternatives and submit it" in prompt
-        assert "separately without changing the required output format" in prompt
+    for phase, prompt in prompts.items():
+        expected = phase in {"execution", "review"}
+        assert prompt.count("When the task requires an answer") == int(expected)
+        if expected:
+            assert "make and submit your\nbest-supported judgment" in prompt
+            assert "separately without changing the required output format" in prompt
+            assert "required answer solely because uncertainty remains" in prompt
         assert "scoring/interface.md" not in prompt
         assert "selected direction" not in prompt.lower()
 
@@ -214,7 +216,7 @@ def test_autoresearch_and_unfocused_ordinary_keep_their_existing_prompt_branches
     assert "FOCUSED MANAGED ORDINARY RESEARCH" not in ordinary_prompt
     assert "DIRECTION BUDGET" in ordinary_prompt
     for prompt in (autoresearch_prompt, ordinary_prompt):
-        assert "Provide your best-supported answer" not in prompt
+        assert "When the task requires an answer" not in prompt
 
 
 def test_resource_finder_uses_distinct_bootstrap_and_additional_contracts():
@@ -242,7 +244,7 @@ def test_resource_finder_uses_distinct_bootstrap_and_additional_contracts():
     assert "DIRECTION BUDGET" not in bootstrap
     assert "DIRECTION BUDGET" not in additional
     for prompt in (bootstrap, additional):
-        assert "Provide your best-supported answer" not in prompt
+        assert "When the task requires an answer" not in prompt
 
 
 @pytest.mark.parametrize("focused", [False, True])
@@ -319,14 +321,17 @@ def test_resource_finder_receives_complete_description_with_short_hypothesis(pha
 
 @pytest.mark.parametrize("focused", [False, True])
 @pytest.mark.parametrize("phase", ["plan", "execution", "review"])
-def test_manager_phase_review_receives_focused_ordinary_context(tmp_path, focused, phase):
+@pytest.mark.parametrize("stage", ["resource_finder", "experiment_runner"])
+def test_manager_phase_review_receives_focused_ordinary_context(
+    tmp_path, focused, phase, stage
+):
     _ordinary(tmp_path, focused)
     manager = HitlManager.__new__(HitlManager)
     manager.work_dir = tmp_path
     manager.request_worker_resolution = lambda **kwargs: kwargs["prompt"]
 
     prompt = manager.review_phase_finish(
-        pipeline_stage="experiment_runner",
+        pipeline_stage=stage,
         hitl_stage=phase,
         plan_text="Plan",
         finish_summary="Ready",
@@ -338,16 +343,23 @@ def test_manager_phase_review_receives_focused_ordinary_context(tmp_path, focuse
 
     assert ("deliver the best solution\npossible" in prompt) is focused
     assert ("Do not\nrequire novelty, competing implementations" in prompt) is focused
-    assert ("its best-supported answer in the required format" in prompt) is focused
-    if focused:
-        assert "For final delivery, within the task's requirements" in prompt
-        assert "withholding the required deliverable solely because\nof uncertainty" in prompt
+    expected = focused and stage == "experiment_runner" and phase != "plan"
+    assert prompt.count("When the task requires an answer") == int(expected)
+    if expected:
+        assert "documented separately but does not replace the required answer" in prompt
+        assert "best-supported judgment satisfies the task's requirements" in prompt
+    if stage == "resource_finder":
+        assert "`literature_review.md` and `resources.md` are mandatory" in prompt
     assert "AutoResearch candidate" not in prompt
 
 
 @pytest.mark.parametrize("focused", [False, True])
 @pytest.mark.parametrize("autoresearch", [False, True])
-def test_manager_raised_idea_submission_guidance_is_scoped(tmp_path, focused, autoresearch):
+@pytest.mark.parametrize("phase", ["execution", "review"])
+@pytest.mark.parametrize("stage", ["resource_finder", "experiment_runner"])
+def test_manager_raised_idea_submission_guidance_is_scoped(
+    tmp_path, focused, autoresearch, phase, stage
+):
     ResearchPipelineOrchestrator(
         work_dir=tmp_path,
         templates_dir=ROOT / "templates",
@@ -359,8 +371,12 @@ def test_manager_raised_idea_submission_guidance_is_scoped(tmp_path, focused, au
     manager.work_dir = tmp_path
     manager.request_worker_resolution = lambda **kwargs: kwargs["prompt"]
     prompt = manager.review_raised_idea(
-        pipeline_stage="experiment_runner",
-        raised_idea={"actor": "experiment_runner", "question": "Evidence is ambiguous."},
+        pipeline_stage=stage,
+        raised_idea={
+            "actor": stage,
+            "hitl_stage": phase,
+            "question": "Evidence is ambiguous.",
+        },
         plan_text="Preserve the required output format.",
         hitl_mode="auto",
         request_context=(
@@ -370,7 +386,9 @@ def test_manager_raised_idea_submission_guidance_is_scoped(tmp_path, focused, au
     )
     assert "Evidence is ambiguous." in prompt
     assert "Preserve the required output format." in prompt
-    assert ("its best-supported answer in the required format" in prompt) is (
+    expected = focused and not autoresearch and stage == "experiment_runner"
+    assert prompt.count("When the task requires an answer") == int(expected)
+    assert ("deliver the best solution\npossible" in prompt) is (
         focused and not autoresearch
     )
 

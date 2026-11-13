@@ -1,11 +1,13 @@
 FOCUSED MANAGED ORDINARY RESEARCH
 ────────────────────────────────────────────────────────────────────────────────
 
-For final delivery, within the task's requirements:
-Provide your best-supported answer in the required format. If the available
-evidence does not uniquely determine the answer, make your best judgment among
-the plausible alternatives and submit it. Document uncertainty and assumptions
-separately without changing the required output format.
+{% if hitl_phase in ["execution", "review"] %}
+When the task requires an answer, provide that answer in the required format.
+If the available evidence does not uniquely determine it, make and submit your
+best-supported judgment. Document material uncertainty and assumptions
+separately without changing the required output format. Do not withhold the
+required answer solely because uncertainty remains.
+{% endif %}
 
 {% if hitl_phase == "plan" %}
 Research the supplied task and deliver the best solution you can within its

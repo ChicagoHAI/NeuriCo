@@ -7,9 +7,13 @@ or opportunities that could materially improve the final solution. Do not
 require novelty, competing implementations, or broader comparisons merely for
 completeness; preserve any such requirements explicitly supplied by the user.
 
-For final delivery, within the task's requirements, require the worker to provide
-its best-supported answer in the required format. If the evidence does not
-uniquely determine the answer, require a best judgment among plausible
-alternatives rather than withholding the required deliverable solely because
-of uncertainty. Uncertainty and assumptions may be documented separately
-without changing the required output format.
+{% if require_best_supported_answer %}
+When the task requires an answer, do not treat unresolved uncertainty alone as
+a sufficient reason for the experiment runner to omit it. If the evidence leaves
+multiple plausible answers, require the runner to make and submit its
+best-supported judgment in the required format. An uncertainty analysis may be
+documented separately but does not replace the required answer. When a
+best-supported judgment satisfies the task's requirements, do not require
+additional investigation solely to eliminate uncertainty before allowing
+completion.
+{% endif %}

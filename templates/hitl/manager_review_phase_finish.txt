@@ -4,6 +4,7 @@ Decide whether the submitted plan or completed work is acceptable, or whether
 the worker should continue with concrete feedback.
 {% if focused_managed_ordinary %}
 
+{% set require_best_supported_answer = pipeline_stage == "experiment_runner" and hitl_stage in ["execution", "review"] %}
 {% include "hitl/manager_focused_managed_ordinary.txt" %}
 {% endif %}
 {% if autoresearch_attempt %}

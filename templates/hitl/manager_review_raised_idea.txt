@@ -1,4 +1,5 @@
 {% if focused_managed_ordinary %}
+{% set require_best_supported_answer = pipeline_stage == "experiment_runner" %}
 {% include "hitl/manager_focused_managed_ordinary.txt" %}
 
 {% endif %}
