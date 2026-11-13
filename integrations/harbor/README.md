@@ -66,9 +66,8 @@ independently and do not prevent normal cancellation, restoration or completion.
 
 The manifest relates emitted provider session IDs to retained native records;
 missing records and interrupted calls are explicit gaps. An early provider
-failure does not require a session that never started. Linux and real no-model
-Harbor lifecycle checks cover normal completion, child failure, public-export
-failure, and timeout cleanup. See the [validation record](../../docs/HARBOR_FOCUSED_ORDINARY_AND_TRACE_VALIDATION.md).
+failure does not require a session that never started. The regression tests cover
+normal completion, child failure, public-export failure, and timeout cleanup.
 
 ### Harbor 0.25.0 runtime requirements
 
