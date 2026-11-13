@@ -794,6 +794,15 @@ def _sanitize_free_text_lines(lines: Iterable[str], redactor: TraceRedactor) -> 
         )
 
 
+def _json_container(content: str) -> dict | list | None:
+    """Decode complete JSON containers, not scalar strings or code fragments."""
+    try:
+        value = json.loads(content)
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, (dict, list)) else None
+
+
 def _sanitize_serializable(
     value: Any,
     *,
@@ -826,6 +835,13 @@ def _sanitize_serializable(
             for child in value
         ]
     if isinstance(value, str):
+        nested = _json_container(value)
+        if nested is not None:
+            sanitized = _sanitize_serializable(
+                nested, redactor=redactor,
+                redact_sensitive_fields=redact_sensitive_fields,
+            )
+            return value if sanitized == nested else json.dumps(sanitized, ensure_ascii=False)
         return _sanitize_free_text(value, redactor)
     if value is None or isinstance(value, (bool, int, float)):
         return value
@@ -885,6 +901,24 @@ def _sanitize_trace_text(
 
 
 def _contains_unredacted_sensitive_material(content: str) -> bool:
+    nested = _json_container(content)
+    if nested is not None:
+        def contains(value):
+            if isinstance(value, dict):
+                return any(
+                    _contains_unredacted_sensitive_material(str(key))
+                    or (_is_sensitive_field_name(str(key)) and value != _REDACTED_VALUE)
+                    or contains(value)
+                    for key, value in value.items()
+                )
+            if isinstance(value, list):
+                return any(contains(item) for item in value)
+            return isinstance(value, str) and _contains_unredacted_sensitive_material(value)
+
+        return contains(nested)
+    lines = [line for line in content.splitlines() if line.strip()]
+    if len(lines) > 1 and all(_json_container(line) is not None for line in lines):
+        return any(_contains_unredacted_sensitive_material(line) for line in lines)
     if _contains_recognizable_secret_value(content):
         return True
     for match in _INLINE_ASSIGNMENT.finditer(content):

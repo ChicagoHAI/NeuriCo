@@ -373,3 +373,56 @@ def test_rejection_locations_do_not_disclose_keys_or_values():
     assert locations == ["sanitized-line-2/member-0/value/item-1"]
     assert "private-key-name" not in str(locations)
     assert "secret-value" not in str(locations)
+
+
+def test_nested_manager_code_result_is_retained(tmp_path):
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    record = {'output': {'content': json.dumps({'content':
+        '    15\ttokens = re.findall(pattern, text)\n    16\tassert tokens'})}}
+    source.write_text(json.dumps(record) + '\n' + json.dumps({'input_tokens': 123}) + '\n')
+    archive.copy_file(source, Path('context.jsonl'), 'research')
+    records = [json.loads(line) for line in (archive.directory / 'context.jsonl').read_text().splitlines()]
+    content = json.loads(records[0]['output']['content'])['content']
+    assert 'assert tokens' in content
+    assert '[REDACTED_SECRET_FIELD]' in content
+    assert records[1]['input_tokens'] == 123
+    assert not archive.gaps
+
+
+@pytest.mark.parametrize('payload', [
+    {'content': '    15\taccess_token = opaque-example-credential\n'},
+    {'access_token': 'opaque-example-credential'},
+    {'content': 'Known credential: secret-value'},
+    {'content': 'Authorization: Bearer opaque-example-credential'},
+])
+def test_nested_manager_credentials_are_removed(tmp_path, payload):
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    source.write_text(json.dumps({'content': json.dumps({'result': json.dumps(payload)})}) + '\n')
+    archive.copy_file(source, Path('context.jsonl'), 'research')
+    retained = (archive.directory / 'context.jsonl').read_text()
+    assert 'opaque-example-credential' not in retained
+    assert 'secret-value' not in retained
+    assert not archive.gaps
+
+
+def test_nested_credential_left_by_sanitizer_is_rejected(tmp_path, monkeypatch):
+    from neurico_harbor_agent import artifacts
+    from neurico_harbor_agent import internal_traces
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    source.write_text(json.dumps({'content': json.dumps({'access_token': 'opaque-example-credential'})}) + '\n')
+    monkeypatch.setattr(artifacts, '_sanitize_trace_text', lambda text, *args, **kwargs: text)
+    monkeypatch.setattr(internal_traces, '_sanitize_trace_text', lambda text, *args, **kwargs: text)
+    archive.copy_file(source, Path('context.jsonl'), 'research')
+    assert not (archive.directory / 'context.jsonl').exists()
+    assert any('sensitive_material_remaining' in gap['reason'] for gap in archive.gaps)
+    assert 'opaque-example-credential' not in json.dumps(archive.gaps)
+
+
+@pytest.mark.parametrize('text', ['ordinary text', '{invalid JSON', 'startup notice\n{"input_tokens": 10}\n'])
+def test_non_json_strings_keep_existing_fallback(text):
+    from neurico_harbor_agent import artifacts
+    redactor = TraceRedactor(('secret-value',))
+    assert artifacts._sanitize_serializable(text, redactor=redactor) == artifacts._sanitize_free_text(text, redactor)
