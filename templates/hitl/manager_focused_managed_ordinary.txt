@@ -6,3 +6,14 @@ assumptions have been checked. Direct further work toward concrete weaknesses
 or opportunities that could materially improve the final solution. Do not
 require novelty, competing implementations, or broader comparisons merely for
 completeness; preserve any such requirements explicitly supplied by the user.
+
+{% if require_best_supported_answer %}
+When the task requires an answer, do not treat unresolved uncertainty alone as
+a sufficient reason for the experiment runner to omit it. If the evidence leaves
+multiple plausible answers, require the runner to make and submit its
+best-supported judgment in the required format. An uncertainty analysis may be
+documented separately but does not replace the required answer. When a
+best-supported judgment satisfies the task's requirements, do not require
+additional investigation solely to eliminate uncertainty before allowing
+completion.
+{% endif %}
