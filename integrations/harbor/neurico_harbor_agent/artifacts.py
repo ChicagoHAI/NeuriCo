@@ -71,6 +71,20 @@ _SENSITIVE_SINGLE_FIELD_TOKENS = frozenset(
 _SENSITIVE_COMPACT_FIELD_SUFFIXES = tuple(
     sorted(_SENSITIVE_SINGLE_FIELD_TOKENS | _TOKEN_FIELD_TOKENS, key=len, reverse=True)
 )
+# Provider analysis metadata, not authentication tokens. Keep these exceptions
+# exact: allowing generic words such as "write" would also exempt write_token.
+_NON_SECRET_USAGE_FIELDS = frozenset(
+    {
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "reasoning_output_tokens",
+        "last_token_usage",
+        "thread_token_usage",
+        "turn_token_usage",
+        "time_to_first_token_ms",
+        "fallback_token_limit_override",
+    }
+)
 _NON_SECRET_TOKEN_METADATA_DESCRIPTORS = frozenset(
     {
         "budget",
@@ -696,6 +710,8 @@ def _is_sensitive_field_name(field_name: str) -> bool:
         return True
     if "auth" in token_set or tokens == ("dsn",) or tokens == ("key",) or tokens == ("pat",):
         return True
+    if field_name in _NON_SECRET_USAGE_FIELDS:
+        return False
     if token_set & _TOKEN_FIELD_TOKENS:
         metadata_tokens = token_set - _TOKEN_FIELD_TOKENS
         return not (metadata_tokens and metadata_tokens <= _NON_SECRET_TOKEN_METADATA_DESCRIPTORS)

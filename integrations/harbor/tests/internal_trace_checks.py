@@ -25,14 +25,27 @@ def _archive(tmp_path):
 def test_private_text_keeps_manager_paths_but_sanitizes_credentials(tmp_path):
     archive = _archive(tmp_path)
     source = tmp_path / "history.jsonl"
+    usage = {"input_tokens": 100, "cached_input_tokens": 50,
+             "cache_write_input_tokens": 0, "reasoning_output_tokens": 10}
     source.write_text(json.dumps({"path": ".neurico/hitl/manager/context.jsonl",
-                                  "input_tokens": 100, "api_key": "secret-value"}) + "\n")
+                                  "input_tokens": 100, "api_key": "secret-value",
+                                  "last_token_usage": usage, "thread_token_usage": usage,
+                                  "turn_token_usage": usage, "time_to_first_token_ms": 12,
+                                  "fallback_token_limit_override": None}) + "\n")
     archive.copy_file(source, Path("provider/history.jsonl"), "provider")
     record = json.loads((archive.directory / "provider/history.jsonl").read_text())
     assert record["path"] == ".neurico/hitl/manager/context.jsonl"
     assert record["input_tokens"] == 100
     assert "secret-value" not in str(record)
     assert archive.files["provider/history.jsonl"]["sanitized"]
+    for field in ("last_token_usage", "thread_token_usage", "turn_token_usage"):
+        assert record[field] == usage
+    assert record["time_to_first_token_ms"] == 12
+    assert record["fallback_token_limit_override"] is None
+    assert not archive.gaps
+    payload = (archive.directory / "provider/history.jsonl").read_bytes()
+    assert archive.files["provider/history.jsonl"]["bytes"] == len(payload)
+    assert archive.files["provider/history.jsonl"]["sha256"] == sha256(payload).hexdigest()
 
 
 def test_native_sqlite_survives_and_redaction_does_not_change_live_history(tmp_path):

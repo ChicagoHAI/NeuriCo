@@ -367,6 +367,66 @@ def test_harmless_metadata_fields_remain_public() -> None:
     }
 
 
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_provider_usage_events_preserve_analysis_metadata(suffix):
+    usage = {
+        "input_tokens": 1200, "output_tokens": 80, "total_tokens": 1280,
+        "cached_input_tokens": 900, "cache_write_input_tokens": 0,
+        "reasoning_output_tokens": 40,
+    }
+    events = [
+        {"type": "turn.completed", "usage": usage},
+        {"type": "event_msg", "payload": {
+            "type": "token_count", "info": {
+                "last_token_usage": usage, "total_token_usage": usage,
+                "model_context_window": 200000,
+            },
+        }},
+        {"type": "event_msg", "payload": {
+            "type": "token_usage_record", "usage": usage,
+            "thread_token_usage": usage, "turn_token_usage": usage,
+        }},
+        {"type": "event_msg", "payload": {
+            "type": "task_complete", "time_to_first_token_ms": 0,
+        }},
+        {"type": "response_item", "metadata": {"fallback_token_limit_override": None}},
+        {"type": "response_item", "metadata": {"fallback_token_limit_override": 4096}},
+    ]
+    raw = (json.dumps(events) if suffix == ".json" else
+           "\n".join(json.dumps(event) for event in events)).encode()
+    safe = artifacts_module._safe_text_payload(raw, suffix, TraceRedactor())
+    assert safe is not None
+    parsed = (json.loads(safe[0]) if suffix == ".json" else
+              [json.loads(line) for line in safe[0].splitlines()])
+    assert parsed == events
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_usage_exemptions_keep_nested_credentials_protected(suffix):
+    credentials = {
+        name: "opaque-" + name
+        for name in ("access_token", "refresh_token", "write_token", "api_key",
+                     "cached_access_token", "reasoning_token", "custom_cached_input_tokens")
+    }
+    record = {"last_token_usage": {
+        "input_tokens": 100, "cached_input_tokens": 50,
+        "cache_write_input_tokens": "configured-secret-value",
+        "notes": [{"text": "configured-secret-value"}], **credentials,
+    }}
+    safe = artifacts_module._safe_text_payload(
+        json.dumps(record).encode(), suffix, TraceRedactor(("configured-secret-value",))
+    )
+    assert safe is not None
+    retained = json.loads(safe[0])["last_token_usage"]
+    assert retained["input_tokens"] == 100
+    assert retained["cached_input_tokens"] == 50
+    assert retained["cache_write_input_tokens"] == "[REDACTED_CONFIGURED_SECRET]"
+    for field in credentials:
+        assert retained[field] == "[REDACTED_SECRET_FIELD]"
+    assert "configured-secret-value" not in safe[0].decode()
+    assert retained["notes"][0]["text"] == "[REDACTED_CONFIGURED_SECRET]"
+
+
 def test_trace_redactor_covers_short_configured_secrets_and_fails_closed_below_limit() -> None:
     redactor = TraceRedactor.from_sources(
         {"SHORT_API_KEY": "abc123"},

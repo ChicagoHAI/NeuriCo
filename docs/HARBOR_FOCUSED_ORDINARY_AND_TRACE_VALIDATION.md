@@ -233,3 +233,40 @@ not weaken sanitization or claim the omission is fixed. The private archive suit
 passes **22 tests**, including checks that rejected payloads and credential values
 are not written into diagnostics. The pilot review in gapbench tracks the wider
 readiness investigation. No additional model calls were made for this step.
+
+
+## Usage metadata preservation (2026-11-12)
+
+Implemented `HARBOR_USAGE_METADATA_FIX_PLAN.md`: eight exact provider metadata
+field names now bypass the generic token-name credential heuristic. The existing
+recursive sanitizer and credential-value scanning are unchanged. This shared
+classifier correction applies to both public and private sanitization, without
+changing artifact selection, research workflow, scoring, or previous evidence.
+
+Complete JSON/JSONL event regressions cover all eight fields, nested usage objects,
+existing input/output/total counters, zero and null values. They also verify that
+credential fields (including `write_token` and names merely containing an exempt
+name) still redact, and configured secrets inside exempt fields and nested lists
+remain protected. The private archive test checks preserved values, redaction,
+parseability, file hashes/sizes, and absence of collection gaps.
+
+Five targeted cases failed before the fix and passed after it. The planned suites:
+
+```sh
+PYTHONPATH="$PWD:$PWD/src:$PWD/integrations/harbor" \
+  integrations/harbor/.venv/bin/python -m pytest \
+  integrations/harbor/tests/contract_checks.py \
+  integrations/harbor/tests/internal_trace_checks.py \
+  integrations/harbor/tests/retention_hook_checks.py -q
+```
+
+returned 122 passed, 7 Linux-only skipped, and one process-inspection permission
+failure in the existing cancellation test. Rerunning that test with local process
+inspection permitted passed (1 test), accounting for all 123 runnable checks.
+The final strengthened credential regressions also passed. Whitespace checks
+passed. No model calls were made.
+
+This fixes the observed usage-field classification bug; it does not recover
+previously redacted values or establish overall evaluation readiness. The
+missing trace-file cause and tool-description redaction remain unresolved and
+separate. No benchmark rerun or historical result edit was performed.
