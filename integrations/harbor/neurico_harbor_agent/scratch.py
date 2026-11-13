@@ -42,17 +42,20 @@ class PrivateOutputSpool:
     handle: BinaryIO
     retained_bytes: int = 0
     truncated: bool = False
+    max_bytes: int | None = SCRATCH_MAX_FILE_BYTES
 
     @classmethod
-    def create(cls) -> "PrivateOutputSpool":
+    def create(cls, *, max_bytes: int | None = SCRATCH_MAX_FILE_BYTES) -> "PrivateOutputSpool":
         handle = tempfile.TemporaryFile(mode="w+b", prefix="neurico-trace-output-")
         os.fchmod(handle.fileno(), 0o600)
-        return cls(handle=handle)
+        return cls(handle=handle, max_bytes=max_bytes)
 
     def append_output(self, payload: bytes) -> bool:
         try:
-            allowance = max(0, SCRATCH_MAX_FILE_BYTES - self.retained_bytes)
-            retained = payload[:allowance]
+            retained = (
+                payload if self.max_bytes is None
+                else payload[:max(0, self.max_bytes - self.retained_bytes)]
+            )
             if retained:
                 self.handle.write(retained)
             self.retained_bytes += len(retained)

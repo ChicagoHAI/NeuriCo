@@ -1,4 +1,4 @@
-"""Child-process entrypoint for one manager-driven NeuriCo AutoResearch run."""
+"""Child-process entrypoint for one manager-driven NeuriCo Harbor run."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from typing import Any
+from uuid import uuid4
 
 # NeuriCo's core modules use the historical top-level ``core`` namespace.
 # The ACP child starts from Harbor's task workspace, so establish the same
@@ -19,7 +20,9 @@ sys.path.insert(0, str(_SRC_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.hitl_run_control import (  # noqa: E402
+    HitlRunStopControl,
     HitlRunStopRequested,
+    activate_hitl_run_stop_control,
     active_hitl_run_stop_control,
 )
 from core.idea_manager import IdeaManager  # noqa: E402
@@ -108,14 +111,61 @@ def execute_autoresearch(
         }
 
 
+def execute_focused_managed_ordinary(
+    *,
+    instruction: str,
+    workspace: Path,
+    ideas_dir: Path,
+) -> dict[str, Any]:
+    """Run one Harbor task through focused managed ordinary research."""
+    task = HarborAutoResearchTask(instruction=instruction, workspace=workspace)
+    idea_manager = IdeaManager(ideas_dir)
+    idea_id = idea_manager.submit_idea(
+        build_harbor_idea(task, workflow="focused-managed-ordinary"),
+        validate=True,
+    )
+
+    runner = ResearchRunner(use_github=False)
+    control = HitlRunStopControl(workspace, uuid4().hex)
+    with activate_hitl_run_stop_control(control):
+        return runner.run_research(
+            idea_id=idea_id,
+            provider="codex",
+            full_permissions=True,
+            multi_agent=True,
+            use_scribe=False,
+            write_paper=False,
+            scoring_enabled=False,
+            benchmark_mode=True,
+            hitl_research="cli",
+            hitl_manager_no_browser=True,
+            hitl_mode="auto",
+            focused_autoresearch=True,
+            workspace_mode="embedded",
+        )
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a Harbor task with NeuriCo AutoResearch")
+    parser = argparse.ArgumentParser(description="Run a Harbor task with NeuriCo")
     parser.add_argument("--instruction-file", type=Path, required=True)
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--ideas-dir", type=Path, required=True)
+    parser.add_argument(
+        "--workflow",
+        choices=("autoresearch", "focused-managed-ordinary"),
+        default="autoresearch",
+    )
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--time-limit-seconds", type=int)
     args = parser.parse_args()
+
+    from core.trace_retention import TRACE_GAP_MARKER
+    from .retention_hooks import install_retention_hooks
+
+    try:
+        install_retention_hooks()
+    except Exception as error:
+        print(f"{TRACE_GAP_MARKER} initialization {type(error).__name__}", flush=True)
 
     stop_requested = threading.Event()
     finished = threading.Event()
@@ -133,17 +183,24 @@ def main() -> None:
     stop_thread.start()
     try:
         instruction = args.instruction_file.read_text(encoding="utf-8")
-        result = execute_autoresearch(
-            instruction=instruction,
-            workspace=args.workspace,
-            ideas_dir=args.ideas_dir,
-            iterations=args.iterations,
-            time_limit_seconds=args.time_limit_seconds,
-        )
+        if args.workflow == "autoresearch":
+            result = execute_autoresearch(
+                instruction=instruction,
+                workspace=args.workspace,
+                ideas_dir=args.ideas_dir,
+                iterations=args.iterations,
+                time_limit_seconds=args.time_limit_seconds,
+            )
+        else:
+            result = execute_focused_managed_ordinary(
+                instruction=instruction,
+                workspace=args.workspace,
+                ideas_dir=args.ideas_dir,
+            )
     finally:
         finished.set()
         stop_thread.join(timeout=0.2)
-    if result.get("time_limit_reached", False):
+    if args.workflow == "autoresearch" and result.get("time_limit_reached", False):
         raise SystemExit(TIME_LIMIT_EXIT_CODE)
     if not result.get("success", False):
         raise SystemExit(1)

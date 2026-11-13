@@ -153,7 +153,8 @@ class PromptGenerator:
                                  scoring_enabled: bool = False,
                                  include_implicit_time_limit: bool = True,
                                  focused_autoresearch: bool = False,
-                                 focused_managed_ordinary: bool = False) -> str:
+                                 focused_managed_ordinary: bool = False,
+                                 benchmark_mode: bool = False) -> str:
         """
         Generate the main research prompt from an idea specification.
 
@@ -216,6 +217,7 @@ class PromptGenerator:
         variables = self._prepare_variables(idea_spec, root_dir)
         variables['focused_autoresearch'] = bool(focused_autoresearch)
         variables['focused_managed_ordinary'] = bool(focused_managed_ordinary)
+        variables['benchmark_mode'] = bool(benchmark_mode)
 
         # Compose the full prompt
         prompt_parts = [
@@ -789,7 +791,8 @@ it fits.
                                        scoring_enabled: bool = False,
                                        phase_name: str = "experiment_runner",
                                        focused_autoresearch: bool = False,
-                                       focused_managed_ordinary: bool = False) -> str:
+                                       focused_managed_ordinary: bool = False,
+                                       benchmark_mode: bool = False) -> str:
         """
         Generate session instructions from template.
 
@@ -878,6 +881,7 @@ and the general workflow, ALWAYS follow the user's instructions.
             'state_contract': state_contract,
             'focused_autoresearch': bool(focused_autoresearch),
             'focused_managed_ordinary': bool(focused_managed_ordinary),
+            'benchmark_mode': bool(benchmark_mode),
         }
 
         rendered = self.render_template(template, variables)

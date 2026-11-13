@@ -271,183 +271,194 @@ def run_prebuilt_cli_agent(
         # Apply after restoring/composing saved prompts; do not rewrite the
         # continuation record or let its previous budget govern a new Start.
         prompt = prompt + "\n\n" + budget_context
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    transcript_file.parent.mkdir(parents=True, exist_ok=True)
+    from core.trace_retention import retained_invocation
 
-    start_time = time.time()
-    timed_out = False
-    stopped = False
-    cancelled = False
-    background_processes_terminated = False
-    return_code: Optional[int] = None
-    process_env = dict(env)
-    remove_github_credentials(process_env)
+    with retained_invocation(
+        "worker", prompt=prompt, command=command_argv, work_dir=str(work_dir),
+        provider=provider, log_file=str(log_file), transcript_file=str(transcript_file),
+    ) as trace_outcome:
+        trace_outcome["process_started"] = False
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        transcript_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if cancel_event is not None and cancel_event.is_set():
-        stopped = hitl_run_stop_requested()
-        cancelled = not stopped
-        log_file.write_text("", encoding="utf-8")
-        transcript_file.write_text("", encoding="utf-8")
+        start_time = time.time()
+        timed_out = False
+        stopped = False
+        cancelled = False
+        background_processes_terminated = False
+        return_code: Optional[int] = None
+        process_env = dict(env)
+        remove_github_credentials(process_env)
+
+        if cancel_event is not None and cancel_event.is_set():
+            stopped = hitl_run_stop_requested()
+            cancelled = not stopped
+            log_file.write_text("", encoding="utf-8")
+            transcript_file.write_text("", encoding="utf-8")
+            if stopped and tracker is not None:
+                tracker.mark_stopped()
+            result = {
+                "success": False,
+                "return_code": None,
+                "elapsed_time": time.time() - start_time,
+                "log_file": str(log_file),
+                "transcript_file": str(transcript_file),
+                "timed_out": False,
+                "stopped": stopped,
+                "cancelled": cancelled,
+                "background_processes_terminated": False,
+                "provider_process_failed": False,
+            }
+            trace_outcome.update(result)
+            return result
+
+        with (
+            open(log_file, "w", encoding="utf-8") as log_f,
+            open(transcript_file, "w", encoding="utf-8") as transcript_f,
+        ):
+            try:
+                process = subprocess.Popen(
+                    command_argv,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=process_env,
+                    text=True,
+                    encoding="utf-8",
+                    bufsize=1,
+                    cwd=str(work_dir),
+                    # Every external worker owns an isolated process group.  A clean
+                    # provider exit is not a valid terminal result if it leaves a
+                    # background child modifying the workspace.
+                    start_new_session=os.name == "posix",
+                )
+            except OSError as exc:
+                if _request_provider_unavailable_stop(provider):
+                    from core.hitl_run_control import HitlRunStopRequested
+
+                    raise HitlRunStopRequested(
+                        "HITL run stopped because its provider was unavailable."
+                    ) from exc
+                raise
+            trace_outcome["process_started"] = True
+            process_group_id = getattr(process, "pid", None) if os.name == "posix" else None
+            if tracker is not None:
+                tracker.mark_running(process.pid)
+
+            if process.stdin is not None:
+                process.stdin.write(prompt)
+                process.stdin.close()
+
+            output_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+
+            def _drain_output() -> None:
+                assert process.stdout is not None
+                try:
+                    for line in iter(process.stdout.readline, ""):
+                        if line:
+                            sanitized_line = sanitize_text(line)
+                            output_queue.put(sanitized_line)
+                except (OSError, ValueError):
+                    pass
+                finally:
+                    output_queue.put(None)
+
+            def _flush_output() -> None:
+                while True:
+                    try:
+                        line = output_queue.get_nowait()
+                    except queue.Empty:
+                        return
+                    if line is None:
+                        continue
+                    write_agent_console(line, prefix=output_prefix, end="")
+                    log_f.write(line)
+                    transcript_f.write(line)
+
+            reader = threading.Thread(target=_drain_output, daemon=True)
+            reader.start()
+
+            deadline = (start_time + timeout) if timeout is not None else None
+            while True:
+                _flush_output()
+                poll = getattr(process, "poll", None)
+                return_code = poll() if callable(poll) else process.wait(timeout=0)
+                if return_code is not None:
+                    break
+                if hitl_run_stop_requested():
+                    stopped = True
+                    _terminate_process_group(process)
+                    break
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    _terminate_process_group(process)
+                    break
+                if deadline is not None and time.time() >= deadline:
+                    timed_out = True
+                    _terminate_process_group(process)
+                    break
+                time.sleep(0.05)
+
+            if timed_out or stopped or cancelled:
+                try:
+                    return_code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _kill_process_group(process)
+                    return_code = process.wait()
+            else:
+                return_code = process.wait()
+            # A stopped/timed-out parent may exit before a child that ignores TERM.
+            # Reuse the retained group ID after reaping the parent in every case.
+            if process_group_id is not None:
+                background_processes_terminated = _terminate_lingering_process_group(
+                    process_group_id
+                )
+            reader.join(timeout=5)
+            _flush_output()
+
+        elapsed = time.time() - start_time
+        provider_process_failed = bool(
+            str(provider or "").strip()
+            and return_code not in {None, 0}
+            and not timed_out
+            and not stopped
+            and not cancelled
+            and not background_processes_terminated
+        )
+        if (
+            provider_process_failed
+            and not defer_provider_failure_to_runtime
+            and _request_provider_unavailable_stop(provider)
+        ):
+            from core.hitl_run_control import HitlRunStopRequested
+
+            raise HitlRunStopRequested(
+                "HITL run stopped because its provider was unavailable."
+            )
         if stopped and tracker is not None:
             tracker.mark_stopped()
-        return {
-            "success": False,
-            "return_code": None,
-            "elapsed_time": time.time() - start_time,
+        success = (
+            (return_code == 0)
+            and not timed_out
+            and not stopped
+            and not cancelled
+            and not background_processes_terminated
+        )
+        result = {
+            "success": success,
+            "return_code": return_code,
+            "elapsed_time": elapsed,
             "log_file": str(log_file),
             "transcript_file": str(transcript_file),
-            "timed_out": False,
+            "timed_out": timed_out,
             "stopped": stopped,
-            "cancelled": cancelled,
-            "background_processes_terminated": False,
-            "provider_process_failed": False,
+            "background_processes_terminated": background_processes_terminated,
+            "provider_process_failed": provider_process_failed,
         }
-
-    with (
-        open(log_file, "w", encoding="utf-8") as log_f,
-        open(transcript_file, "w", encoding="utf-8") as transcript_f,
-    ):
-        try:
-            process = subprocess.Popen(
-                command_argv,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=process_env,
-                text=True,
-                encoding="utf-8",
-                bufsize=1,
-                cwd=str(work_dir),
-                # Every external worker owns an isolated process group.  A clean
-                # provider exit is not a valid terminal result if it leaves a
-                # background child modifying the workspace.
-                start_new_session=os.name == "posix",
-            )
-        except OSError as exc:
-            if _request_provider_unavailable_stop(provider):
-                from core.hitl_run_control import HitlRunStopRequested
-
-                raise HitlRunStopRequested(
-                    "HITL run stopped because its provider was unavailable."
-                ) from exc
-            raise
-        process_group_id = getattr(process, "pid", None) if os.name == "posix" else None
-        if tracker is not None:
-            tracker.mark_running(process.pid)
-
-        if process.stdin is not None:
-            process.stdin.write(prompt)
-            process.stdin.close()
-
-        output_queue: "queue.Queue[Optional[str]]" = queue.Queue()
-
-        def _drain_output() -> None:
-            assert process.stdout is not None
-            try:
-                for line in iter(process.stdout.readline, ""):
-                    if line:
-                        sanitized_line = sanitize_text(line)
-                        output_queue.put(sanitized_line)
-            except (OSError, ValueError):
-                pass
-            finally:
-                output_queue.put(None)
-
-        def _flush_output() -> None:
-            while True:
-                try:
-                    line = output_queue.get_nowait()
-                except queue.Empty:
-                    return
-                if line is None:
-                    continue
-                write_agent_console(line, prefix=output_prefix, end="")
-                log_f.write(line)
-                transcript_f.write(line)
-
-        reader = threading.Thread(target=_drain_output, daemon=True)
-        reader.start()
-
-        deadline = (start_time + timeout) if timeout is not None else None
-        while True:
-            _flush_output()
-            poll = getattr(process, "poll", None)
-            return_code = poll() if callable(poll) else process.wait(timeout=0)
-            if return_code is not None:
-                break
-            if hitl_run_stop_requested():
-                stopped = True
-                _terminate_process_group(process)
-                break
-            if cancel_event is not None and cancel_event.is_set():
-                cancelled = True
-                _terminate_process_group(process)
-                break
-            if deadline is not None and time.time() >= deadline:
-                timed_out = True
-                _terminate_process_group(process)
-                break
-            time.sleep(0.05)
-
-        if timed_out or stopped or cancelled:
-            try:
-                return_code = process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                _kill_process_group(process)
-                return_code = process.wait()
-        else:
-            return_code = process.wait()
-        # A stopped/timed-out parent may exit before a child that ignores TERM.
-        # Reuse the retained group ID after reaping the parent in every case.
-        if process_group_id is not None:
-            background_processes_terminated = _terminate_lingering_process_group(
-                process_group_id
-            )
-        reader.join(timeout=5)
-        _flush_output()
-
-    elapsed = time.time() - start_time
-    provider_process_failed = bool(
-        str(provider or "").strip()
-        and return_code not in {None, 0}
-        and not timed_out
-        and not stopped
-        and not cancelled
-        and not background_processes_terminated
-    )
-    if (
-        provider_process_failed
-        and not defer_provider_failure_to_runtime
-        and _request_provider_unavailable_stop(provider)
-    ):
-        from core.hitl_run_control import HitlRunStopRequested
-
-        raise HitlRunStopRequested(
-            "HITL run stopped because its provider was unavailable."
-        )
-    if stopped and tracker is not None:
-        tracker.mark_stopped()
-    success = (
-        (return_code == 0)
-        and not timed_out
-        and not stopped
-        and not cancelled
-        and not background_processes_terminated
-    )
-    result = {
-        "success": success,
-        "return_code": return_code,
-        "elapsed_time": elapsed,
-        "log_file": str(log_file),
-        "transcript_file": str(transcript_file),
-        "timed_out": timed_out,
-        "stopped": stopped,
-        "background_processes_terminated": background_processes_terminated,
-        "provider_process_failed": provider_process_failed,
-    }
-    if cancel_event is not None:
-        result["cancelled"] = cancelled
-    return result
+        if cancel_event is not None:
+            result["cancelled"] = cancelled
+        trace_outcome.update(result)
+        return result
 
 
 def _terminate_process_group(process: subprocess.Popen) -> None:

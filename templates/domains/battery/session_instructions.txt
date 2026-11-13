@@ -125,7 +125,7 @@ WHAT "FULLY-AUTOMATED" MEANS:
 ✓ Move immediately from one phase to the next
 ✓ Use the pre-gathered resources effectively
 ✓ Document decisions, but keep moving forward
-✓ Deliver REPORT.md with actual results at the end
+{% if not benchmark_mode %}✓ Deliver REPORT.md with actual results at the end{% endif %}
 
 YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
 This prompt contains everything you need. Execute it completely from start to finish.
@@ -261,9 +261,9 @@ Phase 5: Analysis & Comparison (30-45 min)
   → WHEN COMPLETE: Immediately proceed to Phase 6 (Documentation)
 
 Phase 6: Final Documentation (20-30 min) - MANDATORY BEFORE ENDING SESSION
-  ✓ Create REPORT.md with ACTUAL results (not placeholder)
+{% if not benchmark_mode %}  ✓ Create REPORT.md with ACTUAL results (not placeholder)
     - Use the battery-specific report structure from domain guidelines
-    - Choose Option A (Comprehensive) or Option B (Staged) based on what was accomplished
+    - Choose Option A (Comprehensive) or Option B (Staged) based on what was accomplished{% endif %}
   ✓ Create README.md with project overview and key findings
   ✓ If experimental recommendations were generated, save as experimental_recommendations.md
   ✓ Ensure resources.md documents your research process
@@ -278,7 +278,7 @@ CRITICAL REMINDERS:
 - Never stop between phases waiting for user input
 - If you encounter issues, document them and continue
 - Even if computations fail, complete Phase 6 documenting what happened
-- REPORT.md is mandatory - it's the primary deliverable
+{% if not benchmark_mode %}- REPORT.md is mandatory - it's the primary deliverable{% endif %}
 - Experimental recommendations are a VALUABLE output for battery research
 
 WORKSPACE DIRECTORY AND DIRECTORY SAFETY:
@@ -324,7 +324,7 @@ PHASE 6 REQUIREMENTS - WHAT TO INCLUDE IN FINAL DOCUMENTATION
 
 When you reach Phase 6, create these files with ACTUAL results from your experiments:
 
-1. REPORT.md - Comprehensive battery research report containing:
+{% if not benchmark_mode %}1. REPORT.md - Comprehensive battery research report containing:
    - Executive Summary (2-3 paragraphs summarizing key findings)
    - Research Question & Hypothesis
    - Literature Review Summary (key papers and insights from Phase 1)
@@ -338,14 +338,14 @@ When you reach Phase 6, create these files with ACTUAL results from your experim
    - References
 
    Include key visualizations/tables inline (as markdown).
-   Use battery-specific REPORT.md structure from domain guidelines.
+   Use battery-specific REPORT.md structure from domain guidelines.{% endif %}
 
 2. README.md - Quick overview containing:
    - Brief project description (2-3 sentences)
    - Key findings summary (bullet points, 3-5 main results)
    - How to reproduce (environment setup, run instructions)
    - File structure overview
-   - Link to REPORT.md for full details
+{% if not benchmark_mode %}   - Link to REPORT.md for full details{% endif %}
 
    Keep this concise and scannable.
 
@@ -357,7 +357,7 @@ When you reach Phase 6, create these files with ACTUAL results from your experim
 IMPORTANT NOTES:
 - Do NOT create placeholder/stub reports during planning - wait until Phase 6
 - If computations fail or are incomplete, document what you attempted and what happened
-- REPORT.md is the PRIMARY DELIVERABLE - it must contain actual findings
+{% if not benchmark_mode %}- REPORT.md is the PRIMARY DELIVERABLE - it must contain actual findings{% endif %}
 - Experimental recommendations are a VALUABLE secondary deliverable for battery research
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -368,7 +368,7 @@ The session is COMPLETE when:
 ✓ All phases (1-6) have been attempted
 ✓ Pre-gathered resources have been reviewed and used
 ✓ Computational experiments were run (even if simple or preliminary)
-✓ REPORT.md has been created documenting actual results
+{% if not benchmark_mode %}✓ REPORT.md has been created documenting actual results{% endif %}
 ✓ README.md has been created with overview
 ✓ Code is organized with comments
 ✓ Results are saved to results/ directory

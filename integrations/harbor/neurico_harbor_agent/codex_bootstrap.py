@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 
 
-CODEX_VERSION = "0.147.0"
+CODEX_VERSION = "0.167.1"
 NVM_VERSION = "0.40.2"
 
 

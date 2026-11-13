@@ -15,6 +15,9 @@ from typing import Any, Literal
 
 from src.cli.submit_local import _convert_without_llm
 
+HarborWorkflow = Literal["autoresearch", "focused-managed-ordinary"]
+ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
+
 
 @dataclass(frozen=True)
 class HarborAutoResearchTask:
@@ -99,7 +102,9 @@ class CodexInferenceConnection:
             return model
         return self.requested_model
 
-    def prepare_codex_home(self, codex_home: Path) -> dict[str, str]:
+    def prepare_codex_home(
+        self, codex_home: Path, *, reasoning_effort: ReasoningEffort | None = None
+    ) -> dict[str, str]:
         """Create an isolated Codex home and return its secret environment."""
         codex_home.mkdir(parents=True, exist_ok=False)
         codex_home.chmod(0o700)
@@ -112,7 +117,11 @@ class CodexInferenceConnection:
         config_lines = [
             f"model = {json.dumps(self.backend_model)}",
             'cli_auth_credentials_store = "file"',
+            # Task-image login profiles can discard the managed worker's tool PATH.
+            "allow_login_shell = false",
         ]
+        if reasoning_effort is not None:
+            config_lines.append(f"model_reasoning_effort = {json.dumps(reasoning_effort)}")
         secret_environment: dict[str, str] = {}
         if self.mode == "openai-api":
             config_lines.extend(
@@ -182,18 +191,25 @@ def _find_codex_auth_file(environment: Mapping[str, str]) -> Path | None:
     return None
 
 
-def _title_from_instruction(instruction: str) -> str:
+def _title_from_instruction(instruction: str, *, workflow: HarborWorkflow = "autoresearch") -> str:
     """Derive only the schema-required title; preserve the full task elsewhere."""
     first_line = next((line.strip() for line in instruction.splitlines() if line.strip()), "")
     first_line = re.sub(r"^#{1,6}\s+", "", first_line)
     first_line = re.sub(r"\s+", " ", first_line).strip()
     title = first_line[:197].rstrip()
     if len(title) < 10:
-        title = f"Harbor AutoResearch: {title or 'Research task'}"
+        label = (
+            "Harbor AutoResearch"
+            if workflow == "autoresearch"
+            else "Harbor focused managed ordinary research"
+        )
+        title = f"{label}: {title or 'Research task'}"
     return title
 
 
-def build_harbor_idea(task: HarborAutoResearchTask) -> dict[str, Any]:
+def build_harbor_idea(
+    task: HarborAutoResearchTask, *, workflow: HarborWorkflow = "autoresearch"
+) -> dict[str, Any]:
     """Use NeuriCo's local converter to wrap a Harbor instruction as an idea.
 
     The complete instruction is retained in ``background.description``, which
@@ -203,9 +219,9 @@ def build_harbor_idea(task: HarborAutoResearchTask) -> dict[str, Any]:
     converted = _convert_without_llm(
         {
             "path": "harbor://instruction",
-            "title": _title_from_instruction(task.instruction),
+            "title": _title_from_instruction(task.instruction, workflow=workflow),
             "description": task.instruction,
-            "tags": ["harbor", "autoresearch"],
+            "tags": ["harbor", workflow],
             "author": None,
             "raw_text": task.instruction,
         }
@@ -239,10 +255,14 @@ def build_autoresearch_environment(
     *,
     ideas_dir: Path,
     codex_home: Path,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> dict[str, str]:
     """Build the environment inherited by NeuriCo and all Codex agents."""
     environment = dict(base_environment)
-    environment.update(connection.prepare_codex_home(codex_home))
+    environment.update(connection.prepare_codex_home(codex_home, reasoning_effort=reasoning_effort))
+    # Reuse the native worker override so an inherited host setting cannot
+    # supersede Harbor's model. The manager inherits the isolated Codex config.
+    environment["NEURICO_AGENT_MODEL"] = connection.backend_model
     environment["CODEX_HOME"] = str(codex_home)
     environment["NEURICO_IDEAS"] = str(ideas_dir)
     environment["PYTHONUNBUFFERED"] = "1"

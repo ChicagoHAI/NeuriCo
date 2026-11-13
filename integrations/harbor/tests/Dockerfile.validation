@@ -1,0 +1,8 @@
+# Local no-model Linux validation; build from a clean NeuriCo source export.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git procps && rm -rf /var/lib/apt/lists/*
+COPY . /source
+WORKDIR /source
+RUN uv sync --project integrations/harbor --locked --extra dev
+ENV PYTHONPATH=/source:/source/src:/source/integrations/harbor
+CMD ["integrations/harbor/.venv/bin/python", "-m", "pytest", "integrations/harbor/tests/contract_checks.py", "integrations/harbor/tests/workflow_checks.py", "integrations/harbor/tests/provider_checks.py", "integrations/harbor/tests/internal_trace_checks.py", "integrations/harbor/tests/retention_hook_checks.py", "-q"]

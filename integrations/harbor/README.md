@@ -1,11 +1,91 @@
 # NeuriCo Harbor agent
 
 This directory is the locked ACP runtime for using NeuriCo's manager-driven
-AutoResearch as a Harbor agent. The adapter converts Harbor's prompt through
-NeuriCo's existing local-idea converter and launches fresh HITL AutoResearch in
+AutoResearch or focused managed ordinary research as a Harbor agent. The adapter
+converts Harbor's prompt through NeuriCo's existing local-idea converter and runs in
 headless Auto mode inside Harbor's supplied repository, using NeuriCo's Codex
 provider. Auto mode uses the manager for every review boundary but never waits
 for human input.
+
+## Workflow selection
+
+`NEURICO_HARBOR_WORKFLOW` selects `autoresearch` (the unchanged default) or
+`focused-managed-ordinary`. Focused managed ordinary uses the native resource
+finder and experiment runner with the manager in Auto mode, including the normal
+planning, review, revision, and completion boundaries. It enables focused mode
+and disables internal scoring, the AutoResearch improvement loop, paper writing,
+and scribe output. Harbor's verifier evaluates the delivered task solution.
+In this unscored benchmark workflow, NeuriCo does not require an additional
+research-only `REPORT.md`; any report explicitly requested by the task remains
+part of the supplied instructions. Ordinary non-benchmark reporting and scored
+AutoResearch artifact validation retain their existing contracts.
+
+`NEURICO_HARBOR_AUTORESEARCH_ITERATIONS` and
+`NEURICO_HARBOR_TIME_LIMIT_SECONDS` apply only to AutoResearch and are ignored
+by focused managed ordinary. Harbor's configured task timeout still applies to
+both workflows. Both reuse the existing supervisor and native cooperative stop.
+
+`NEURICO_HARBOR_REASONING_EFFORT` optionally selects `low`, `medium`, `high`,
+or `xhigh` in the shared isolated Codex configuration. Omit it to keep Codex's
+default. The study uses `high`. Login shells are disabled so task-image shell
+profiles do not remove the managed tools from `PATH`. Harbor's requested model
+also sets NeuriCo's existing worker model override; the manager inherits the
+same isolated Codex configuration. Requested settings are recorded separately
+from observations in provider traces.
+
+## Internal analysis archive (opt-in)
+
+Set `NEURICO_HARBOR_PRESERVE_INTERNAL_TRACES=1` to retain private analysis
+records under `/logs/agent/neurico/<run-id>/`, which Harbor downloads with its
+agent logs. The default is `0`; existing public export rules remain unchanged.
+The archive is private local evidence, not an automatically published bundle.
+
+The parent creates the run directory before launch and collects records after
+the child stops and output drains, before temporary idea/provider homes are
+removed. It retains native provider sessions and logs, the submitted idea,
+NeuriCo logs and private state, manager SQLite history, research documents and
+binary outputs, and the complete available child stream. Auth files and live
+MCP credentials are excluded; retained text is sanitized. SQLite is backed up
+and sanitized in the copy without modifying live history. The manifest records
+file hashes, observed provider settings, lifecycle information, sanitization,
+and explicit omissions. Available records survive finalization failure.
+
+Private collection also runs when public storage or public export fails. Its
+status is separate from the research exit status and official verifier score.
+It does not forward private records into ACP messages. Existing private scratch
+is checked for otherwise unretained records; truncated prefixes are flagged
+unless the complete original source was recovered. No new research deadline,
+retry policy, or workflow stage is introduced by collection.
+
+When enabled, narrow recording hooks retain final worker prompts, manager
+requests/raw responses/stderr, per-invocation outcomes and existing runtime
+identities. They copy evidence before native logs are reused or rollback removes
+work. Existing private state checkpoints are exported without creating new
+checkpoints or changing workflow decisions. Collection failures are recorded
+independently and do not prevent normal cancellation, restoration or completion.
+
+The manifest relates emitted provider session IDs to retained native records;
+missing records and interrupted calls are explicit gaps. An early provider
+failure does not require a session that never started. The regression tests cover
+normal completion, child failure, public-export failure, and timeout cleanup.
+
+### Harbor 0.25.0 runtime requirements
+
+Harbor 0.25.0 needs two separate compatibility patches: pin its ACP client to
+0.12.1, and forward timeout cancellation to the agent while awaiting final
+collection before downloading logs and deleting the container. The cancellation
+patch preserves the official timeout outcome; its bounded cleanup wait does not
+extend the research budget. These are Harbor runtime changes, not changes shipped
+by this NeuriCo adapter.
+
+The patches are maintained separately in the gapbench integration checkout as
+`patches/harbor-0.25.0-acp-client-pin.patch` and
+`patches/harbor-0.25.0-acp-cancellation.patch`, with application instructions in
+`docs/acp-client-version.md`. That runtime work must be distributed separately
+for other operators; merging this adapter alone does not install those patches.
+Preserve the applied patches and runtime file hashes with evaluation provenance.
+An unpatched Harbor 0.25.0 installation does not provide the validated
+timeout-collection behavior.
 
 ## Contract
 
@@ -15,14 +95,14 @@ for human input.
 - Harbor's complete text prompt is preserved in
   `idea.background.description`. NeuriCo's prompt generator already promotes
   that field as high-priority user instructions.
-- NeuriCo runs fresh manager-driven HITL AutoResearch in Auto mode. The manager
+- By default, NeuriCo runs fresh manager-driven HITL AutoResearch in Auto mode. The manager
   reviews resource-finder, rule-maker, experiment, and scoring boundaries and
   may request repairs or replacement workers without human interaction. The
   resource finder may use Harbor's supplied repository and any external sources
   allowed by the task's Harbor network policy. The scored lifecycle then
   continues with a baseline experiment, scoring, proposals, candidate
   experiments, and manager-governed accept-or-restore checkpointing.
-- The adapter is benchmark-focused. Internal scoring is enabled, while paper
+- The adapter is benchmark-focused. AutoResearch enables internal scoring, while paper
   generation and scribe/notebook output are always disabled. Harbor's verifier
   remains the authoritative benchmark result after the agent exits.
 - One AutoResearch improvement iteration is used by default, matching
@@ -61,7 +141,7 @@ for human input.
   `HOSTED_INFERENCE_URL`. Direct OpenAI API mode accepts `OPENAI_API_KEY` and
   optional `OPENAI_BASE_URL`.
 - NeuriCo's idea registry and Codex home are kept in a temporary control
-  directory outside the task repository. Research state and the retained best
+  directory outside the task repository. Research state and the delivered
   implementation remain in Harbor's workspace.
 - The Harbor parent supervisor performs trace collection, but
   `/logs/artifacts/` is an agent-controlled Harbor publication channel rather
@@ -166,7 +246,7 @@ for human input.
   duplicated into scratch. Scratch is not mentioned in ACP messages or public
   trace metadata and normally disappears when Harbor destroys the task
   container. Manager history remains in NeuriCo's private `.neurico` state and
-  is not duplicated. Collection is final-state based: a workspace file that a
+  is not duplicated when internal retention is disabled. Default collection is final-state based: a workspace file that a
   worker creates and deletes before the supervised process exits cannot be
   recovered unless its content also appeared in stdout or a durable NeuriCo
   log.
@@ -208,7 +288,7 @@ for human input.
 
 The Python source runtime exposes a locked `codex` launcher. It uses an already
 available Codex CLI only when its version exactly matches the adapter pin;
-otherwise it installs `@openai/codex@0.147.0` into the execution user's cache.
+otherwise it installs `@openai/codex@0.167.1` into the execution user's cache.
 This mirrors Harbor's own Codex-agent installation strategy while keeping the
 NeuriCo source manifest compatible with Harbor's `python-uv` runtime. The
 launcher also ensures that Git, which AutoResearch needs for local checkpoints,
@@ -285,16 +365,24 @@ API-compatible endpoint.
 The adapter intentionally does not accept raw NeuriCo command-line arguments.
 Benchmark controls are added as individually validated `NEURICO_HARBOR_*`
 environment variables so a Harbor config cannot silently enable unrelated
-research-publication behavior. Iteration count and the optional whole-run time
-limit are the only such controls; model choice belongs to Harbor, and paper
-generation remains off.
+research-publication behavior. The workflow selector, reasoning effort, and
+private trace-retention option are described above. Iteration count and the
+optional whole-run time limit apply only to AutoResearch; model choice belongs
+to Harbor, and paper generation remains off.
 
 ## Contract tests
 
+Run from the NeuriCo repository root:
+
 ```bash
-cd integrations/harbor
-uv sync --frozen --extra dev
-uv run --frozen --extra dev pytest -q tests/contract_checks.py
+uv sync --project integrations/harbor --locked --extra dev
+PYTHONPATH="$PWD:$PWD/src:$PWD/integrations/harbor" \
+  integrations/harbor/.venv/bin/python -m pytest -q \
+  integrations/harbor/tests/contract_checks.py \
+  integrations/harbor/tests/workflow_checks.py \
+  integrations/harbor/tests/provider_checks.py \
+  integrations/harbor/tests/internal_trace_checks.py \
+  integrations/harbor/tests/retention_hook_checks.py
 ```
 
 The suite includes a real stdio ACP handshake and model-selection round trip,
