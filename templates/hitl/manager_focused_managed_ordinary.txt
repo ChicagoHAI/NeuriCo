@@ -6,3 +6,10 @@ assumptions have been checked. Direct further work toward concrete weaknesses
 or opportunities that could materially improve the final solution. Do not
 require novelty, competing implementations, or broader comparisons merely for
 completeness; preserve any such requirements explicitly supplied by the user.
+
+For final delivery, within the task's requirements, require the worker to provide
+its best-supported answer in the required format. If the evidence does not
+uniquely determine the answer, require a best judgment among plausible
+alternatives rather than withholding the required deliverable solely because
+of uncertainty. Uncertainty and assumptions may be documented separately
+without changing the required output format.

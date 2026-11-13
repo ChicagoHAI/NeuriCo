@@ -20,6 +20,14 @@ research-only `REPORT.md`; any report explicitly requested by the task remains
 part of the supplied instructions. Ordinary non-benchmark reporting and scored
 AutoResearch artifact validation retain their existing contracts.
 
+Focused managed ordinary research asks the experiment runner to submit its
+best-supported answer in the required format, even when the evidence does not
+uniquely determine it, within the task's requirements. The manager reviews final
+delivery against that objective. Uncertainty and assumptions are documented
+separately in the existing research records without changing the required output
+format. This guidance also applies outside Harbor; it does not change planning,
+approval, or completion boundaries or require an additional report.
+
 `NEURICO_HARBOR_AUTORESEARCH_ITERATIONS` and
 `NEURICO_HARBOR_TIME_LIMIT_SECONDS` apply only to AutoResearch and are ignored
 by focused managed ordinary. Harbor's configured task timeout still applies to

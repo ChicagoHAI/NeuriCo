@@ -1,6 +1,12 @@
 FOCUSED MANAGED ORDINARY RESEARCH
 ────────────────────────────────────────────────────────────────────────────────
 
+For final delivery, within the task's requirements:
+Provide your best-supported answer in the required format. If the available
+evidence does not uniquely determine the answer, make your best judgment among
+the plausible alternatives and submit it. Document uncertainty and assumptions
+separately without changing the required output format.
+
 {% if hitl_phase == "plan" %}
 Research the supplied task and deliver the best solution you can within its
 requirements and available resources. Let that objective guide your choice of

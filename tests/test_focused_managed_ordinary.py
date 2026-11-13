@@ -140,7 +140,10 @@ def test_baseline_construction_cannot_change_focus(tmp_path):
         )
 
 
-def test_focused_ordinary_experiment_prompts_are_solution_oriented_and_unscored(tmp_path):
+@pytest.mark.parametrize("benchmark_mode", [False, True])
+def test_focused_ordinary_experiment_prompts_are_solution_oriented_and_unscored(
+    tmp_path, benchmark_mode
+):
     orchestrator = _ordinary(tmp_path, True)
 
     prompts = {
@@ -150,6 +153,7 @@ def test_focused_ordinary_experiment_prompts_are_solution_oriented_and_unscored(
             use_scribe=False,
             scoring_enabled=False,
             hitl_phase=phase,
+            benchmark_mode=benchmark_mode,
         )
         for phase in ("plan", "execution", "review")
     }
@@ -165,6 +169,10 @@ def test_focused_ordinary_experiment_prompts_are_solution_oriented_and_unscored(
     assert "Why You Expect This Solution to Best Address the Task" in prompts["execution"]
     assert "DIRECTION BUDGET" not in prompts["execution"]
     for prompt in prompts.values():
+        assert prompt.count("Provide your best-supported answer in the required format") == 1
+        assert "For final delivery, within the task's requirements" in prompt
+        assert "the plausible alternatives and submit it" in prompt
+        assert "separately without changing the required output format" in prompt
         assert "scoring/interface.md" not in prompt
         assert "selected direction" not in prompt.lower()
 
@@ -205,6 +213,8 @@ def test_autoresearch_and_unfocused_ordinary_keep_their_existing_prompt_branches
     assert "FOCUSED MANAGED ORDINARY RESEARCH" not in autoresearch_prompt
     assert "FOCUSED MANAGED ORDINARY RESEARCH" not in ordinary_prompt
     assert "DIRECTION BUDGET" in ordinary_prompt
+    for prompt in (autoresearch_prompt, ordinary_prompt):
+        assert "Provide your best-supported answer" not in prompt
 
 
 def test_resource_finder_uses_distinct_bootstrap_and_additional_contracts():
@@ -231,6 +241,8 @@ def test_resource_finder_uses_distinct_bootstrap_and_additional_contracts():
     assert "established managed research workspace" in additional
     assert "DIRECTION BUDGET" not in bootstrap
     assert "DIRECTION BUDGET" not in additional
+    for prompt in (bootstrap, additional):
+        assert "Provide your best-supported answer" not in prompt
 
 
 @pytest.mark.parametrize("focused", [False, True])
@@ -305,15 +317,17 @@ def test_resource_finder_receives_complete_description_with_short_hypothesis(pha
     assert generator._extract_user_instructions(prompt) == instruction.strip()
 
 
-def test_manager_phase_review_receives_focused_ordinary_context(tmp_path):
-    _ordinary(tmp_path, True)
+@pytest.mark.parametrize("focused", [False, True])
+@pytest.mark.parametrize("phase", ["plan", "execution", "review"])
+def test_manager_phase_review_receives_focused_ordinary_context(tmp_path, focused, phase):
+    _ordinary(tmp_path, focused)
     manager = HitlManager.__new__(HitlManager)
     manager.work_dir = tmp_path
     manager.request_worker_resolution = lambda **kwargs: kwargs["prompt"]
 
     prompt = manager.review_phase_finish(
         pipeline_stage="experiment_runner",
-        hitl_stage="plan",
+        hitl_stage=phase,
         plan_text="Plan",
         finish_summary="Ready",
         related_artifacts=[],
@@ -322,9 +336,43 @@ def test_manager_phase_review_receives_focused_ordinary_context(tmp_path):
         hitl_mode="auto",
     )
 
-    assert "deliver the best solution\npossible" in prompt
-    assert "Do not\nrequire novelty, competing implementations" in prompt
+    assert ("deliver the best solution\npossible" in prompt) is focused
+    assert ("Do not\nrequire novelty, competing implementations" in prompt) is focused
+    assert ("its best-supported answer in the required format" in prompt) is focused
+    if focused:
+        assert "For final delivery, within the task's requirements" in prompt
+        assert "withholding the required deliverable solely because\nof uncertainty" in prompt
     assert "AutoResearch candidate" not in prompt
+
+
+@pytest.mark.parametrize("focused", [False, True])
+@pytest.mark.parametrize("autoresearch", [False, True])
+def test_manager_raised_idea_submission_guidance_is_scoped(tmp_path, focused, autoresearch):
+    ResearchPipelineOrchestrator(
+        work_dir=tmp_path,
+        templates_dir=ROOT / "templates",
+        managed_initial_run=True,
+        hitl_autoresearch=autoresearch,
+        focused_autoresearch=focused,
+    )
+    manager = HitlManager.__new__(HitlManager)
+    manager.work_dir = tmp_path
+    manager.request_worker_resolution = lambda **kwargs: kwargs["prompt"]
+    prompt = manager.review_raised_idea(
+        pipeline_stage="experiment_runner",
+        raised_idea={"actor": "experiment_runner", "question": "Evidence is ambiguous."},
+        plan_text="Preserve the required output format.",
+        hitl_mode="auto",
+        request_context=(
+            {"parent_node_id": "parent", "attempt_id": "attempt", "proposal_idea_id": "idea"}
+            if autoresearch else None
+        ),
+    )
+    assert "Evidence is ambiguous." in prompt
+    assert "Preserve the required output format." in prompt
+    assert ("its best-supported answer in the required format" in prompt) is (
+        focused and not autoresearch
+    )
 
 
 def test_detached_worker_accepts_focused_ordinary_request(tmp_path, monkeypatch):
