@@ -2,7 +2,11 @@
 
 Branch: `harbor-focused-ordinary-integration`.
 Base: upstream main `42ff31321b86a5f4c6984433b02c9fe009e3e95f`.
-Implementation is in progress; no end-to-end completion claim yet.
+Implementation is complete on this local branch. The chronological checkpoints
+below retain their original findings; references to pending work describe that
+checkpoint, not the current status. Benchmark experiment results are recorded
+separately. Current runtime requirements are documented in the
+[adapter README](../integrations/harbor/README.md#harbor-0250-runtime-requirements).
 
 ## Checkpoint 1: workflow routing and native invocation
 
@@ -270,3 +274,23 @@ This fixes the observed usage-field classification bug; it does not recover
 previously redacted values or establish overall evaluation readiness. The
 missing trace-file cause and tool-description redaction remain unresolved and
 separate. No benchmark rerun or historical result edit was performed.
+
+
+## Pre-submission local check
+
+Verified GitHub's current main at
+`42ff31321b86a5f4c6984433b02c9fe009e3e95f`, already an ancestor of this
+branch. No upstream merge or conflict resolution was necessary. The GitHub API
+was used to confirm the remote tip because the local fetch did not complete.
+
+The five Harbor suites (`contract_checks`, `workflow_checks`, `provider_checks`,
+`internal_trace_checks`, and `retention_hook_checks`) plus the focused managed
+ordinary, managed ordinary report, managed task-context, and runner CLI suites
+passed together: **247 passed, 7 Linux-only skipped** on macOS. Process inspection
+was enabled for the cancellation tests. `git diff --check` passed. No model run
+was started for this check.
+
+Updated the adapter README's runtime prerequisites and local test command;
+removed its stale in-progress pilot status. Benchmark results remain separate
+from this PR documentation. The Harbor compatibility patches remain a separate
+runtime dependency, not part of the NeuriCo implementation.

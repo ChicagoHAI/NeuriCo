@@ -66,11 +66,27 @@ independently and do not prevent normal cancellation, restoration or completion.
 
 The manifest relates emitted provider session IDs to retained native records;
 missing records and interrupted calls are explicit gaps. An early provider
-failure does not require a session that never started. Linux and real no-model Harbor lifecycle checks pass. Harbor 0.25.0
-requires the ACP client and cancellation compatibility patches documented in
-gapbench to forward hard-timeout cancellation before collecting logs. The live
-two-frame Harbor/gapbench pilot is still in progress; end-to-end readiness is
-not yet claimed.
+failure does not require a session that never started. Linux and real no-model
+Harbor lifecycle checks cover normal completion, child failure, public-export
+failure, and timeout cleanup. See the [validation record](../../docs/HARBOR_FOCUSED_ORDINARY_AND_TRACE_VALIDATION.md).
+
+### Harbor 0.25.0 runtime requirements
+
+Harbor 0.25.0 needs two separate compatibility patches: pin its ACP client to
+0.12.1, and forward timeout cancellation to the agent while awaiting final
+collection before downloading logs and deleting the container. The cancellation
+patch preserves the official timeout outcome; its bounded cleanup wait does not
+extend the research budget. These are Harbor runtime changes, not changes shipped
+by this NeuriCo adapter.
+
+The patches are maintained separately in the gapbench integration checkout as
+`patches/harbor-0.25.0-acp-client-pin.patch` and
+`patches/harbor-0.25.0-acp-cancellation.patch`, with application instructions in
+`docs/acp-client-version.md`. That runtime work must be distributed separately
+for other operators; merging this adapter alone does not install those patches.
+Preserve the applied patches and runtime file hashes with evaluation provenance.
+An unpatched Harbor 0.25.0 installation does not provide the validated
+timeout-collection behavior.
 
 ## Contract
 
@@ -350,16 +366,24 @@ API-compatible endpoint.
 The adapter intentionally does not accept raw NeuriCo command-line arguments.
 Benchmark controls are added as individually validated `NEURICO_HARBOR_*`
 environment variables so a Harbor config cannot silently enable unrelated
-research-publication behavior. Iteration count and the optional whole-run time
-limit are the only such controls; model choice belongs to Harbor, and paper
-generation remains off.
+research-publication behavior. The workflow selector, reasoning effort, and
+private trace-retention option are described above. Iteration count and the
+optional whole-run time limit apply only to AutoResearch; model choice belongs
+to Harbor, and paper generation remains off.
 
 ## Contract tests
 
+Run from the NeuriCo repository root:
+
 ```bash
-cd integrations/harbor
-uv sync --frozen --extra dev
-uv run --frozen --extra dev pytest -q tests/contract_checks.py
+uv sync --project integrations/harbor --locked --extra dev
+PYTHONPATH="$PWD:$PWD/src:$PWD/integrations/harbor" \
+  integrations/harbor/.venv/bin/python -m pytest -q \
+  integrations/harbor/tests/contract_checks.py \
+  integrations/harbor/tests/workflow_checks.py \
+  integrations/harbor/tests/provider_checks.py \
+  integrations/harbor/tests/internal_trace_checks.py \
+  integrations/harbor/tests/retention_hook_checks.py
 ```
 
 The suite includes a real stdio ACP handshake and model-selection round trip,

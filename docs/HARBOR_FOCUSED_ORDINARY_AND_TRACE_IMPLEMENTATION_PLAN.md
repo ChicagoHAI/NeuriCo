@@ -1,6 +1,6 @@
 # Harbor focused managed ordinary research and trace preservation
 
-Status: implementation authorized; in progress on `harbor-focused-ordinary-integration`.
+Status: implemented on `harbor-focused-ordinary-integration`; retained as the design and implementation record.
 Local commits only; no pushes or PR creation.
 
 Prepared: 2026-11-12.
