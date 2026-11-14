@@ -428,28 +428,32 @@ def test_non_json_strings_keep_existing_fallback(text):
     assert artifacts._sanitize_serializable(text, redactor=redactor) == artifacts._sanitize_free_text(text, redactor)
 
 
-@pytest.mark.parametrize('nested', [
-    '{"access_token":"opaque-example-credential","access_token":"[REDACTED_SECRET_FIELD]"}',
-    '{"access_token":"opaque-example-credential","access_\\u0074oken":"[REDACTED_SECRET_FIELD]"}',
-    '[{"access_token":"opaque-example-credential","access_token":"[REDACTED_SECRET_FIELD]"}]',
-])
-def test_nested_duplicate_keys_cannot_hide_credentials(tmp_path, nested):
+@pytest.mark.parametrize('first_key', ['access_token', r'access_\u0074oken'])
+@pytest.mark.parametrize('second_key', ['access_token', r'access_\u0074oken'])
+@pytest.mark.parametrize('credential_first', [True, False])
+@pytest.mark.parametrize('wrapper', ['string', 'array_string', 'json', 'jsonl'])
+def test_duplicate_keys_reject_without_exposing_credentials(
+    tmp_path, first_key, second_key, credential_first, wrapper
+):
     from neurico_harbor_agent import artifacts
 
-    assert artifacts._json_container(nested) is None
-    redactor = TraceRedactor(())
-    assert artifacts._sanitize_serializable(nested, redactor=redactor) == (
-        artifacts._sanitize_free_text(nested, redactor)
-    )
-    # The final check must also detect the credential if sanitization misses it.
-    assert artifacts._contains_unredacted_sensitive_material(nested)
+    values = ['opaque-example-credential', '[REDACTED_SECRET_FIELD]']
+    if not credential_first:
+        values.reverse()
+    nested = ('{"' + first_key + '":"' + values[0]
+              + '","' + second_key + '":"' + values[1] + '"}')
+    with pytest.raises(ValueError, match='Duplicate JSON key'):
+        artifacts._json_container(nested)
+    with pytest.raises(ValueError, match='Duplicate JSON key'):
+        artifacts._contains_unredacted_sensitive_material(nested)
     archive = _archive(tmp_path)
-    source = tmp_path / 'context.jsonl'
-    source.write_text(json.dumps({'content': nested}) + '\n')
-    archive.copy_file(source, Path('context.jsonl'), 'research')
-    destination = archive.directory / 'context.jsonl'
-    if destination.exists():
-        assert 'opaque-example-credential' not in destination.read_text()
-        json.loads(destination.read_text())
+    source = tmp_path / ('context.json' if wrapper == 'json' else 'context.jsonl')
+    if wrapper in {'string', 'array_string'}:
+        content = json.dumps({'content': '[' + nested + ']' if wrapper == 'array_string' else nested})
     else:
-        assert archive.gaps
+        content = nested
+    source.write_text(content + '\n')
+    archive.copy_file(source, Path(source.name), 'research')
+    assert not (archive.directory / source.name).exists()
+    assert archive.gaps == [{'source': source.name, 'reason': 'ValueError'}]
+    assert 'opaque-example-credential' not in json.dumps(archive.gaps)

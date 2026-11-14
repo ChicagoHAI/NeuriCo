@@ -794,19 +794,20 @@ def _sanitize_free_text_lines(lines: Iterable[str], redactor: TraceRedactor) -> 
         )
 
 
-def _json_container(content: str) -> dict | list | None:
-    """Decode complete JSON containers, not scalar strings or code fragments."""
-    def unique_object(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("Duplicate JSON key")
-            result[key] = value
-        return result
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = value
+    return result
 
+
+def _json_container(content: str) -> dict | list | None:
+    """Decode containers; duplicate keys must fail closed, not use text fallback."""
     try:
-        value = json.loads(content, object_pairs_hook=unique_object)
-    except (ValueError, RecursionError):
+        value = json.loads(content, object_pairs_hook=_unique_json_object)
+    except (json.JSONDecodeError, RecursionError):
         return None
     return value if isinstance(value, (dict, list)) else None
 
@@ -866,7 +867,7 @@ def _sanitize_trace_text(
     suffix = suffix.lower()
     if suffix == ".json":
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(content, object_pairs_hook=_unique_json_object)
         except json.JSONDecodeError:
             pass
         else:
@@ -889,7 +890,7 @@ def _sanitize_trace_text(
             if not line.strip():
                 continue
             try:
-                parsed = json.loads(line)
+                parsed = json.loads(line, object_pairs_hook=_unique_json_object)
             except json.JSONDecodeError:
                 break
             rendered_lines.append(
