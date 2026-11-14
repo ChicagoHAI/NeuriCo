@@ -373,3 +373,205 @@ def test_rejection_locations_do_not_disclose_keys_or_values():
     assert locations == ["sanitized-line-2/member-0/value/item-1"]
     assert "private-key-name" not in str(locations)
     assert "secret-value" not in str(locations)
+
+
+def test_nested_manager_code_result_is_retained(tmp_path):
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    record = {'output': {'content': json.dumps({'content':
+        '    15\ttokens = re.findall(pattern, text)\n    16\tassert tokens'})}}
+    source.write_text(json.dumps(record) + '\n' + json.dumps({'input_tokens': 123}) + '\n')
+    archive.copy_file(source, Path('context.jsonl'), 'research')
+    records = [json.loads(line) for line in (archive.directory / 'context.jsonl').read_text().splitlines()]
+    content = json.loads(records[0]['output']['content'])['content']
+    assert 'assert tokens' in content
+    assert '[REDACTED_SECRET_FIELD]' in content
+    assert records[1]['input_tokens'] == 123
+    assert not archive.gaps
+
+
+@pytest.mark.parametrize('payload', [
+    {'content': '    15\taccess_token = opaque-example-credential\n'},
+    {'access_token': 'opaque-example-credential'},
+    {'content': 'Known credential: secret-value'},
+    {'content': 'Authorization: Bearer opaque-example-credential'},
+])
+def test_nested_manager_credentials_are_removed(tmp_path, payload):
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    source.write_text(json.dumps({'content': json.dumps({'result': json.dumps(payload)})}) + '\n')
+    archive.copy_file(source, Path('context.jsonl'), 'research')
+    retained = (archive.directory / 'context.jsonl').read_text()
+    assert 'opaque-example-credential' not in retained
+    assert 'secret-value' not in retained
+    assert not archive.gaps
+
+
+@pytest.mark.parametrize('depth', [1, 2, 3])
+def test_json_valued_exact_secret_is_redacted_before_decoding(tmp_path, depth):
+    secret = '{"value":"opaque-example-credential"}'
+    archive = InternalTraceArchive.create(
+        tmp_path / 'archive', 'run', TraceRedactor((secret,))
+    )
+    value = secret
+    for _ in range(depth):
+        value = json.dumps({'content': value})
+    source = tmp_path / 'context.jsonl'
+    source.write_text(value + '\n')
+    archive.copy_file(source, Path('context.jsonl'), 'research')
+    retained = (archive.directory / 'context.jsonl').read_text()
+    assert 'opaque-example-credential' not in retained
+    decoded = retained
+    for _ in range(depth):
+        decoded = json.loads(decoded)['content']
+    assert decoded == '[REDACTED_CONFIGURED_SECRET]'
+    assert not archive.gaps
+
+
+def test_nested_credential_left_by_sanitizer_is_rejected(tmp_path, monkeypatch):
+    from neurico_harbor_agent import artifacts
+    from neurico_harbor_agent import internal_traces
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    source.write_text(json.dumps({'content': json.dumps({'access_token': 'opaque-example-credential'})}) + '\n')
+    monkeypatch.setattr(artifacts, '_sanitize_trace_text', lambda text, *args, **kwargs: text)
+    monkeypatch.setattr(internal_traces, '_sanitize_trace_text', lambda text, *args, **kwargs: text)
+    archive.copy_file(source, Path('context.jsonl'), 'research')
+    assert not (archive.directory / 'context.jsonl').exists()
+    assert any('sensitive_material_remaining' in gap['reason'] for gap in archive.gaps)
+    assert 'opaque-example-credential' not in json.dumps(archive.gaps)
+
+
+@pytest.mark.parametrize('text', ['ordinary text', '{invalid JSON', 'startup notice\n{"input_tokens": 10}\n'])
+def test_non_json_strings_keep_existing_fallback(text):
+    from neurico_harbor_agent import artifacts
+    redactor = TraceRedactor(('secret-value',))
+    assert artifacts._sanitize_serializable(text, redactor=redactor) == artifacts._sanitize_free_text(text, redactor)
+
+
+@pytest.mark.parametrize('first_key', ['access_token', r'access_\u0074oken'])
+@pytest.mark.parametrize('second_key', ['access_token', r'access_\u0074oken'])
+@pytest.mark.parametrize('credential_first', [True, False])
+@pytest.mark.parametrize('wrapper', ['string', 'array_string', 'json', 'jsonl'])
+def test_duplicate_keys_reject_without_exposing_credentials(
+    tmp_path, first_key, second_key, credential_first, wrapper
+):
+    from neurico_harbor_agent import artifacts
+
+    values = ['opaque-example-credential', '[REDACTED_SECRET_FIELD]']
+    if not credential_first:
+        values.reverse()
+    nested = ('{"' + first_key + '":"' + values[0]
+              + '","' + second_key + '":"' + values[1] + '"}')
+    with pytest.raises(ValueError, match='Duplicate JSON key'):
+        artifacts._decode_nested_json(nested)
+    with pytest.raises(ValueError, match='Duplicate JSON key'):
+        artifacts._contains_unredacted_sensitive_material(nested)
+    archive = _archive(tmp_path)
+    source = tmp_path / ('context.json' if wrapper == 'json' else 'context.jsonl')
+    if wrapper in {'string', 'array_string'}:
+        content = json.dumps({'content': '[' + nested + ']' if wrapper == 'array_string' else nested})
+    else:
+        content = nested
+    source.write_text(content + '\n')
+    archive.copy_file(source, Path(source.name), 'research')
+    assert not (archive.directory / source.name).exists()
+    assert archive.gaps == [{'source': source.name, 'reason': 'ValueError'}]
+    assert 'opaque-example-credential' not in json.dumps(archive.gaps)
+
+
+def _encode_json_layers(value, layers):
+    for _ in range(layers):
+        value = json.dumps(value)
+    return value
+
+
+@pytest.mark.parametrize('layers', [2, 3, 4])
+@pytest.mark.parametrize('suffix', ['.json', '.jsonl'])
+def test_extra_string_layers_redact_and_preserve_encoding(tmp_path, layers, suffix):
+    archive = _archive(tmp_path)
+    source = tmp_path / ('context' + suffix)
+    payload = {'access_token': 'opaque-example-credential', 'message': 'keep this'}
+    source.write_text(json.dumps({'content': _encode_json_layers(payload, layers)}) + '\n')
+    archive.copy_file(source, Path(source.name), 'research')
+    output = archive.directory / source.name
+    decoded = json.loads(output.read_text())['content']
+    for _ in range(layers):
+        assert isinstance(decoded, str)
+        decoded = json.loads(decoded)
+    assert decoded == {'access_token': '[REDACTED_SECRET_FIELD]', 'message': 'keep this'}
+    assert not archive.gaps
+
+
+@pytest.mark.parametrize('layers', [1, 2, 3])
+def test_extra_string_layers_keep_benign_text_exactly(layers):
+    from neurico_harbor_agent import artifacts
+    original = _encode_json_layers(' { "message" : "hello", "count" : 2 } ', layers)
+    assert artifacts._sanitize_serializable(original, redactor=TraceRedactor(())) == original
+    assert not artifacts._contains_unredacted_sensitive_material(original)
+
+
+@pytest.mark.parametrize('layers', [1, 2, 3])
+def test_extra_string_layers_redact_decoded_configured_secret(tmp_path, layers):
+    secret = '{"value":"opaque-example-credential"}'
+    archive = InternalTraceArchive.create(tmp_path / 'archive', 'run', TraceRedactor((secret,)))
+    source = tmp_path / 'context.jsonl'
+    source.write_text(json.dumps({'content': _encode_json_layers(secret, layers)}) + '\n')
+    archive.copy_file(source, Path(source.name), 'research')
+    decoded = json.loads((archive.directory / source.name).read_text())['content']
+    for _ in range(layers):
+        decoded = json.loads(decoded)
+    assert decoded == '[REDACTED_CONFIGURED_SECRET]'
+    assert not archive.gaps
+
+
+@pytest.mark.parametrize('layers', [1, 2, 3])
+@pytest.mark.parametrize('credential_first', [True, False])
+def test_extra_string_layers_reject_duplicate_keys(tmp_path, layers, credential_first):
+    from neurico_harbor_agent import artifacts
+    values = ['opaque-example-credential', '[REDACTED_SECRET_FIELD]']
+    if not credential_first:
+        values.reverse()
+    duplicate = ('{"access_token":' + json.dumps(values[0])
+                 + ',"access_\\u0074oken":' + json.dumps(values[1]) + '}')
+    encoded = _encode_json_layers(duplicate, layers)
+    with pytest.raises(ValueError, match='Duplicate JSON key'):
+        artifacts._contains_unredacted_sensitive_material(encoded)
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    source.write_text(json.dumps({'content': encoded}) + '\n')
+    archive.copy_file(source, Path(source.name), 'research')
+    assert not (archive.directory / source.name).exists()
+    assert archive.gaps == [{'source': source.name, 'reason': 'ValueError'}]
+
+
+def test_extra_string_layers_validator_rejects_missed_credential(tmp_path, monkeypatch):
+    from neurico_harbor_agent import artifacts, internal_traces
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    source.write_text(json.dumps({'content': _encode_json_layers(
+        {'access_token': 'opaque-example-credential'}, 3)}) + '\n')
+    monkeypatch.setattr(artifacts, '_sanitize_trace_text', lambda text, *a, **kw: text)
+    monkeypatch.setattr(internal_traces, '_sanitize_trace_text', lambda text, *a, **kw: text)
+    archive.copy_file(source, Path(source.name), 'research')
+    assert not (archive.directory / source.name).exists()
+    assert any('sensitive_material_remaining' in gap['reason'] for gap in archive.gaps)
+
+
+@pytest.mark.parametrize('layers,accepted', [(3, True), (4, False)])
+def test_nested_json_depth_boundary(tmp_path, monkeypatch, layers, accepted):
+    from neurico_harbor_agent import artifacts
+    monkeypatch.setattr(artifacts, '_MAX_NESTED_JSON_DEPTH', 4)
+    archive = _archive(tmp_path)
+    source = tmp_path / 'context.jsonl'
+    # One outer record plus the encoded object/string layers.
+    content = json.dumps({'content': _encode_json_layers({'message': 'safe'}, layers)})
+    source.write_text(content + '\n')
+    if accepted:
+        assert not artifacts._contains_unredacted_sensitive_material(content)
+    else:
+        with pytest.raises(ValueError, match='JSON nesting limit exceeded'):
+            artifacts._contains_unredacted_sensitive_material(content)
+    archive.copy_file(source, Path(source.name), 'research')
+    assert (archive.directory / source.name).exists() == accepted
+    assert archive.gaps == ([] if accepted else [{'source': source.name, 'reason': 'ValueError'}])
