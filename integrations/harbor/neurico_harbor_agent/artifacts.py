@@ -796,8 +796,16 @@ def _sanitize_free_text_lines(lines: Iterable[str], redactor: TraceRedactor) -> 
 
 def _json_container(content: str) -> dict | list | None:
     """Decode complete JSON containers, not scalar strings or code fragments."""
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
     try:
-        value = json.loads(content)
+        value = json.loads(content, object_pairs_hook=unique_object)
     except (ValueError, RecursionError):
         return None
     return value if isinstance(value, (dict, list)) else None
