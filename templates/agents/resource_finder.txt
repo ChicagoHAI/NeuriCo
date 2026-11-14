@@ -280,6 +280,8 @@ FOCUS ON:
 - Papers with code/datasets available
 - Papers directly related to the hypothesis
 
+{% include "agents/cross_domain_discovery.txt" %}
+
 STEP 3: Download and Organize Papers
 ─────────────────────────────────────────────────────────────────────────────
 

@@ -1,0 +1,58 @@
+STEP 2A: Supplement the Topic Search with Transferable Methods
+─────────────────────────────────────────────────────────────────────────────
+
+Use this supplement when the research question has a methodological gap that
+methods from another field could address. Respect explicit source/domain limits
+and the current invocation's objective. If outside-domain discovery is out of
+scope, or no search budget remains, record that and continue with the topic results.
+
+1. Preserve the topic results before expanding.
+   Record the accepted topic papers and existing resources in resources.md, using
+   DOI, a stable URL, or title/year to identify each paper. Keep these entries and
+   their evidence when adding methods. A shorter reading shortlist must not remove
+   them from the resource catalog. Merge duplicate records while retaining their
+   source trails; record corrections explicitly rather than silently dropping work.
+
+2. Rewrite queries around the problem, while retaining the original queries.
+   Describe the task's target, available observations, sample/data constraints,
+   desired method properties, and assumptions. Formulate a complementary query
+   without requiring the application-domain name. For example, early battery-life
+   prediction with few cells and correlated features suggests "small-sample
+   regression with correlated predictors and interpretable variable selection".
+   Preserve substantive constraints; do not merely delete the domain word or
+   assume a familiar algorithm is the answer. Use terminology from retrieved
+   methods to refine a query only if it addresses an unresolved gap.
+
+3. Trace citations with evidence of their purpose.
+   From a relevant seed paper, inspect the passage surrounding a promising
+   reference. Distinguish method use/adaptation, conceptual contribution,
+   comparison, data/tool use, background, and unclear attribution. Follow a
+   reference when that passage suggests a concrete contribution to the gap;
+   citation count or outside-domain origin alone is insufficient. Record the
+   citing paper, cited paper, passage location and attribution uncertainty.
+   Check the cited source's own abstract or method passage when accessible.
+   Keep the independent rewritten-query route: citations need not expose methods
+   that have not yet been used in the target field.
+
+4. Judge and append additions using source evidence.
+   For each candidate, identify the method capability, its concrete use in this
+   task, corresponding inputs/outputs, and assumptions or mismatches. Judge
+   transferable-method fit separately from topic similarity. Include useful
+   methods without forcing an outside-domain quota or a top-three position.
+   In literature_review.md and resources.md, record the discovery query or citation
+   path, stable source link, short supporting passage and location, evidence level
+   (full-text passage, abstract, or search-only), proposed use and limitation.
+   Mark insufficient evidence as "needs verification"; a failed source fetch is
+   not proof of irrelevance. Distinguish inferred applicability from demonstrated
+   target-domain results. Report new source papers separately from new methods
+   already represented in the topic literature.
+
+Keep the supplement bounded by the remaining task budget. Unless the task grants
+a different expansion budget, use at most two additional search queries total
+(including reference lookups), inspect citation contexts from at most two seed
+papers, and open at most four additional candidate-source pages. Reuse acquired
+text and deduplicate before further reading. These are caps within the overall
+budget, not permission to extend it. Record actual expansion work and remaining
+uncertainty, then continue with the combined catalog. This procedure uses the
+available search tools and source reading; it does not require a new embedding
+service or a recursive citation crawl.
