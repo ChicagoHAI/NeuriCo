@@ -803,13 +803,22 @@ def _unique_json_object(pairs):
     return result
 
 
-def _json_container(content: str) -> dict | list | None:
-    """Decode containers; duplicate keys must fail closed, not use text fallback."""
+_MAX_NESTED_JSON_DEPTH = 16
+
+
+def _decode_nested_json(content: str, *, depth: int = 0) -> dict | list | str | None:
+    """Decode one structured/string layer; ambiguous or excessive nesting fails closed."""
     try:
         value = json.loads(content, object_pairs_hook=_unique_json_object)
-    except (json.JSONDecodeError, RecursionError):
+    except json.JSONDecodeError:
         return None
-    return value if isinstance(value, (dict, list)) else None
+    except RecursionError as exc:
+        raise ValueError("JSON nesting limit exceeded") from exc
+    if not isinstance(value, (dict, list, str)):
+        return None
+    if depth >= _MAX_NESTED_JSON_DEPTH:
+        raise ValueError("JSON nesting limit exceeded")
+    return value
 
 
 def _sanitize_serializable(
@@ -818,6 +827,7 @@ def _sanitize_serializable(
     redactor: TraceRedactor,
     field_name: str | None = None,
     redact_sensitive_fields: bool = True,
+    _json_depth: int = 0,
 ) -> Any:
     if redact_sensitive_fields and field_name is not None and _is_sensitive_field_name(field_name):
         return _REDACTED_VALUE
@@ -832,6 +842,7 @@ def _sanitize_serializable(
                 redactor=redactor,
                 field_name=rendered_key,
                 redact_sensitive_fields=redact_sensitive_fields,
+                _json_depth=_json_depth,
             )
         return sanitized
     if isinstance(value, (list, tuple)):
@@ -840,17 +851,19 @@ def _sanitize_serializable(
                 child,
                 redactor=redactor,
                 redact_sensitive_fields=redact_sensitive_fields,
+                _json_depth=_json_depth,
             )
             for child in value
         ]
     if isinstance(value, str):
         # A configured credential may itself be a JSON-valued string.
         value = redactor.sanitize(value)
-        nested = _json_container(value)
+        nested = _decode_nested_json(value, depth=_json_depth)
         if nested is not None:
             sanitized = _sanitize_serializable(
                 nested, redactor=redactor,
                 redact_sensitive_fields=redact_sensitive_fields,
+                _json_depth=_json_depth + 1,
             )
             return value if sanitized == nested else json.dumps(sanitized, ensure_ascii=False)
         return _sanitize_free_text(value, redactor)
@@ -879,6 +892,7 @@ def _sanitize_trace_text(
                         parsed,
                         redactor=redactor,
                         redact_sensitive_fields=redact_sensitive_fields,
+                        _json_depth=1,
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -901,6 +915,7 @@ def _sanitize_trace_text(
                         parsed,
                         redactor=redactor,
                         redact_sensitive_fields=redact_sensitive_fields,
+                        _json_depth=1,
                     ),
                     ensure_ascii=False,
                     sort_keys=True,
@@ -911,25 +926,30 @@ def _sanitize_trace_text(
     return _sanitize_free_text(content, redactor)
 
 
-def _contains_unredacted_sensitive_material(content: str) -> bool:
-    nested = _json_container(content)
+def _contains_unredacted_sensitive_material(content: str, *, _json_depth: int = 0) -> bool:
+    nested = _decode_nested_json(content, depth=_json_depth)
     if nested is not None:
         def contains(value):
             if isinstance(value, dict):
                 return any(
-                    _contains_unredacted_sensitive_material(str(key))
+                    _contains_unredacted_sensitive_material(str(key), _json_depth=_json_depth + 1)
                     or (_is_sensitive_field_name(str(key)) and value != _REDACTED_VALUE)
                     or contains(value)
                     for key, value in value.items()
                 )
             if isinstance(value, list):
                 return any(contains(item) for item in value)
-            return isinstance(value, str) and _contains_unredacted_sensitive_material(value)
+            return isinstance(value, str) and _contains_unredacted_sensitive_material(
+                value, _json_depth=_json_depth + 1
+            )
 
         return contains(nested)
     lines = [line for line in content.splitlines() if line.strip()]
-    if len(lines) > 1 and all(_json_container(line) is not None for line in lines):
-        return any(_contains_unredacted_sensitive_material(line) for line in lines)
+    if len(lines) > 1 and all(_decode_nested_json(line, depth=_json_depth) is not None for line in lines):
+        return any(
+            _contains_unredacted_sensitive_material(line, _json_depth=_json_depth)
+            for line in lines
+        )
     if _contains_recognizable_secret_value(content):
         return True
     for match in _INLINE_ASSIGNMENT.finditer(content):
