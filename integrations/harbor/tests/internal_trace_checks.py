@@ -407,6 +407,27 @@ def test_nested_manager_credentials_are_removed(tmp_path, payload):
     assert not archive.gaps
 
 
+@pytest.mark.parametrize('depth', [1, 2, 3])
+def test_json_valued_exact_secret_is_redacted_before_decoding(tmp_path, depth):
+    secret = '{"value":"opaque-example-credential"}'
+    archive = InternalTraceArchive.create(
+        tmp_path / 'archive', 'run', TraceRedactor((secret,))
+    )
+    value = secret
+    for _ in range(depth):
+        value = json.dumps({'content': value})
+    source = tmp_path / 'context.jsonl'
+    source.write_text(value + '\n')
+    archive.copy_file(source, Path('context.jsonl'), 'research')
+    retained = (archive.directory / 'context.jsonl').read_text()
+    assert 'opaque-example-credential' not in retained
+    decoded = retained
+    for _ in range(depth):
+        decoded = json.loads(decoded)['content']
+    assert decoded == '[REDACTED_CONFIGURED_SECRET]'
+    assert not archive.gaps
+
+
 def test_nested_credential_left_by_sanitizer_is_rejected(tmp_path, monkeypatch):
     from neurico_harbor_agent import artifacts
     from neurico_harbor_agent import internal_traces

@@ -844,6 +844,8 @@ def _sanitize_serializable(
             for child in value
         ]
     if isinstance(value, str):
+        # A configured credential may itself be a JSON-valued string.
+        value = redactor.sanitize(value)
         nested = _json_container(value)
         if nested is not None:
             sanitized = _sanitize_serializable(
