@@ -80,27 +80,60 @@ def test_raised_idea_continuation_retains_guidance_and_feedback(tmp_path, phase,
 
 @pytest.mark.parametrize("mode", ["auto", "full"])
 @pytest.mark.parametrize("stage", ["resource_finder", "experiment_runner", "rule_maker"])
-def test_manager_decision_guidance_preserves_existing_authority(tmp_path, mode, stage):
+@pytest.mark.parametrize("idea_type", ["evidence", "decision"])
+def test_manager_raised_idea_guidance_preserves_type_and_authority(
+    tmp_path, mode, stage, idea_type
+):
+    raised_idea = {
+        "actor": stage,
+        "pipeline_stage": stage,
+        "hitl_stage": "execution",
+        "idea_type": idea_type,
+        "idea_category": "other",
+        "context": "Independent measurements disagree.",
+        "reason_for_escalation": "The disagreement affects the approved approach.",
+    }
+    if idea_type == "decision":
+        raised_idea.update(
+            premises=["I1"],
+            decision_needed="Which measurement should we investigate first?",
+            options=[
+                {"option_id": "A", "text": "Repeat the original measurement."},
+                {"option_id": "B", "text": "Repeat the independent measurement."},
+            ],
+        )
+    else:
+        raised_idea["evidence"] = "The independent measurement differs from the original."
+    HitlRuntime.validate_raised_idea(raised_idea, existing_ids={"I1"})
     manager = HitlManager.__new__(HitlManager)
     manager.work_dir = tmp_path
     manager.request_worker_resolution = lambda **kwargs: kwargs["prompt"]
     prompt = manager.review_raised_idea(
         pipeline_stage=stage,
-        raised_idea={"actor": stage, "hitl_stage": "execution"},
+        raised_idea=raised_idea,
         plan_text="Existing approved scope",
         hitl_mode=mode,
     )
-    assert "Check whether the worker's options include the consequential alternatives" in prompt
-    assert "task requirement or an approved choice as established fact" in prompt
-    assert "use CUSTOM feedback to direct a comparison" in prompt
-    assert "CUSTOM" in prompt
+    normalized_prompt = " ".join(prompt.split())
+    assert (
+        "Check whether the worker's options include the consequential alternatives" in prompt
+    ) == (idea_type == "decision")
+    assert ("use CUSTOM feedback to direct a comparison" in prompt) == (
+        idea_type == "decision"
+    )
+    assert "task requirement or an approved choice as established fact" in normalized_prompt
+    assert "Distinguish checks of implementation correctness from tests of the disputed premise" in normalized_prompt
+    assert "Keep working choices provisional and reopen them when conflicting results challenge their basis" in normalized_prompt
     if mode == "auto":
         assert "`ask_human` is unavailable" in prompt
         assert "Do not add routing options" in prompt
         assert "assumption within that scope is permitted" in prompt
+        assert "For evidence ideas, omit options and decision" in prompt
+        assert "For decision ideas, preserve the worker's substantive options" in prompt
     else:
         assert "preserve the worker's options exactly" in prompt
         assert "use `ask_human` inside this same request" in prompt
+        assert "For evidence ideas:\n- omit options;\n- omit decision;" in prompt
     system = render_hitl_template("interactive_manager_system.txt", hitl_mode=mode)
     assert system.count("Treat supplied resources as evidence") == 1
     assert "supplied claim must be preserved" in system
