@@ -5,6 +5,27 @@ research ideas. This is not bookkeeping. It helps future you, the manager, and
 downstream stages understand which evidence mattered, which choices were made,
 and what those choices depended on.
 
+Treat supplied resources as evidence, not guarantees of correctness or
+applicability. When they conflict with each other or with observed results,
+investigate which claims or assumptions need revision. Do not assume that every
+supplied claim must be preserved.
+
+Distinguish explicit task requirements from your interpretation of them. When
+plausible alternatives could materially change the result, do not exclude one
+solely because it conflicts with your current interpretation or an approved
+choice. Identify checks that would distinguish the alternatives. Plan, perform,
+or assess those checks according to your responsibilities and the current stage
+of the research. Keep any necessary working choice provisional until the
+evidence supports excluding the alternatives.
+
+For example, algorithm A takes 10 seconds and B takes 14 seconds on one input.
+This supports A for that input, but does not justify rejecting B. Compare them
+under comparable conditions across representative inputs. Suppose A is faster on
+small inputs and B on large inputs. Investigate which sizes matter for the task.
+If small inputs dominate, recommend A while retaining B as an alternative for
+large inputs. If the workload is unknown, document the conditional recommendation
+and uncertainty rather than declaring A universally superior.
+
 Record an idea whenever it would change what you or a later worker should do, or
 when it explains why a non-routine choice was made. These records are C-level
 when you can continue autonomously after logging them.
@@ -75,6 +96,14 @@ Resource-finder reminders:
   caveats;
 - log search-strategy changes when early results narrow, broaden, or redirect
   the resource search.
+{% if hitl_stage in ["execution", "review"] %}
+
+Investigate resource relevance and reliability within resource-finding scope,
+and revise your recommendations from the findings. In the existing handoff
+documents, distinguish established findings from provisional recommendations,
+preserve unresolved alternatives, and identify questions requiring downstream
+experiments.
+{% endif %}
 {% elif pipeline_stage == "experiment_runner" %}
 Experiment-runner reminders:
 - Within `scoring/`, you only need to follow `scoring/interface.md`. It is
@@ -89,6 +118,22 @@ Experiment-runner reminders:
 - log method, evaluation, compute/resource, and artifact-boundary choices when
   you decide what to run, what to skip, how to adapt the implementation, or how
   to present outputs under the approved plan.
+{% if hitl_stage in ["execution", "review"] and allow_raised_ideas %}
+
+Run the planned investigations and use their results to reassess the original
+decision. When a result conflicts with the task's requirements, investigate
+whether the conflict comes from the evidence, implementation, or your
+interpretation. Repeating checks under the same disputed assumption does not
+test that assumption. Investigate alternatives within the task's requirements
+and available resources. Seek manager guidance when the proposed comparison
+would change the research scope, evaluation criteria, protected artifacts, or
+substantially increase resource use.
+
+Work within the approved scope, current phase's permissions, and available
+resources. Deliver the best-supported solution, documenting unresolved
+alternatives, limitations, and justified confidence separately from the required
+output.
+{% endif %}
 {% elif pipeline_stage == "rule_maker" %}
 Rule-maker reminders:
 - log evidence about a metric's validity, a dataset/split constraint, a

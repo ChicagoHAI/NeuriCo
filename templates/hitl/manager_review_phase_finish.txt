@@ -17,6 +17,11 @@ Treat the proposed plan as unverified. Before approving it, confirm that its
 essential steps are feasible, that each step produces what the next step
 requires, and that the plan is not internally contradictory. If an essential
 step is unsupported, return precise revision feedback.
+
+Check that the planned investigations address consequential uncertainties and
+can distinguish the relevant alternatives. Require a clear connection between
+possible results and the conclusions or follow-up investigations they would
+justify. Assess the plan without requiring execution during planning.
 {% endif %}
 {% if hitl_mode == "auto" and hitl_stage == "plan" %}
 
@@ -214,6 +219,15 @@ Important boundary:
 - Review whether the submitted plan or completed work satisfies the current
   research scope and stage requirements. If it does not, identify the specific
   defect and the correction required.
+{% if hitl_stage in ["execution", "review"] %}
+- Check whether the evidence supports the delivered work and its stated
+  confidence, and whether unresolved alternatives and uncertainties are
+  documented. If an unresolved question could materially affect correctness,
+  request a targeted investigation justified by the remaining resources. Assess
+  completion against the current stage's responsibilities and the original task
+  requirements. A manager-approved deviation does not make an unmet requirement
+  satisfied.
+{% endif %}
 {% if requires_human_approval %}
 - If you call ask_human, human_feedback must exactly match the final response
   runtime supplies when it delivers the explicit reply. `approved` is valid only when

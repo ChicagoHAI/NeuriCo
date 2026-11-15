@@ -1,9 +1,13 @@
 Required plan content:
 - goal and scope for this stage
-- current workspace state and assumptions
+- Current workspace state, established knowledge, consequential assumptions,
+  and unresolved questions.
 - intended artifacts to create or update
 - step-by-step execution plan
 - decision/evidence criteria for ideas that can be handled autonomously
+- Planned investigations: the relevant alternatives, experiments or checks that
+  distinguish them, and what each outcome would justify concluding or
+  investigating next.
 - escalation criteria for ideas that require manager{% if hitl_mode != "auto" %} or human{% endif %} feedback,
   only when the worker cannot proceed within the approved plan without changing
   research scope, evaluation meaning, protected artifact boundaries, substantial

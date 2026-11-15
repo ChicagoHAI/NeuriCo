@@ -1228,6 +1228,7 @@ class HitlManager:
             parent_node_id=assigned_candidate_sha,
             pipeline_stage=pipeline_stage,
             requesting_actor=str(raised_idea.get("actor", "")).strip(),
+            raised_idea_type=str(raised_idea.get("idea_type", "")).strip(),
             plan_text=plan_text,
             raised_idea_json=json.dumps(raised_idea, indent=2, ensure_ascii=False),
             hitl_mode=selected_mode.value,

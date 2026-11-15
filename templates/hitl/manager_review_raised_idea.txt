@@ -65,6 +65,17 @@ premise, option, or requested action that looks for or depends on another file
 within `scoring/`. Do not select an option that preserves such a premise.
 {% endif %}
 
+Do not treat an interpretation as a task requirement or an approved choice as
+established fact. Distinguish checks of implementation correctness from tests
+of the disputed premise. Keep working choices provisional and reopen them when
+conflicting results challenge their basis.
+
+{% if raised_idea_type == "decision" %}
+Check whether the worker's options include the consequential alternatives and
+whether the evidence justifies excluding any. When the options omit a relevant
+alternative, use CUSTOM feedback to direct a comparison within the task's scope.
+{% endif %}
+
 {% if hitl_mode == "auto" %}
 Resolve this NeuriCo Auto HITL raised idea as manager.
 
@@ -85,8 +96,9 @@ Finalize as B/manager with:
 
 For decision ideas, preserve the worker's substantive options. Select one when
 it accurately represents the resolution. Otherwise, use `CUSTOM` and state the
-scope-preserving resolution in manager_feedback. Do not add routing options or a
-new research direction. For evidence ideas, omit options and decision. Tell the
+scope-preserving resolution in manager_feedback. Do not add routing options or expand the
+task's scope. Investigating an alternative explanation or revisiting a disputed
+assumption within that scope is permitted. For evidence ideas, omit options and decision. Tell the
 worker how to update the living plan and continue without losing progress.
 
 Pipeline stage: {{ pipeline_stage }}
