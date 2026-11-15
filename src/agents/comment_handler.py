@@ -286,13 +286,12 @@ def _run_comment_handler_with_remote_workspace(
         if result["timed_out"]:
             print(f"\nComment handler timed out after {timeout} seconds")
             success = False
-        elif result["return_code"] == 0:
+        elif result["success"]:
             print("Agent execution completed successfully!")
             success = True
         else:
             print(f"Agent execution finished with return code: {result['return_code']}")
-            # Still consider it a success if it completed (might have warnings)
-            success = True
+            success = False
 
     except Exception as e:
         print(f"\nError during comment handling: {e}")
@@ -302,6 +301,7 @@ def _run_comment_handler_with_remote_workspace(
     elapsed = time.time() - start_time
 
     return {
+        **result,
         'success': success,
         'log_file': str(launch["log_file"]),
         'transcript_file': str(launch["transcript_file"]),
