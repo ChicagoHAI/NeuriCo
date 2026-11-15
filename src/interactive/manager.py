@@ -501,7 +501,7 @@ def main():
     parser.add_argument(
         "--backend",
         default=None,
-        choices=["cli", "anthropic_api", "openrouter"],
+        choices=["cli", "anthropic_api", "openrouter", "requesty"],
         help="LLM backend for manager reasoning (default: from config)"
     )
     parser.add_argument(
