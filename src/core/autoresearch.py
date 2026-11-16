@@ -101,6 +101,10 @@ CHECKPOINT_EXCLUDE_PATTERNS = (
 
 COMPARISON_EPS = 1e-6
 MAX_INVALID_ATTEMPTS_PER_VALID_ITERATION = 3
+SCORING_RESULTS_FORMAT_HINT = (
+    "See docs/AUTORESEARCH.md#integrating-an-external-evaluator "
+    "for the scoring/results.json format."
+)
 
 # Allowed drop in a satisfied-property's normalized margin before the
 # comparator calls it a regression. Strict COMPARISON_EPS on unsatisfied
@@ -742,6 +746,14 @@ class ScoringResultComparator:
                 candidate_summary=candidate,
             )
 
+        if not parent.valid:
+            return ComparisonDecision(
+                accepted=False,
+                reason=f"Parent scoring result is invalid: {parent.error}",
+                parent_summary=parent,
+                candidate_summary=candidate,
+            )
+
         if candidate.properties is None:
             return ComparisonDecision(
                 accepted=False,
@@ -947,39 +959,39 @@ class ScoringResultComparator:
         return None
 
     def summarize(self, payload: Dict[str, Any], source: str = "results") -> ScoreSummary:
-        if not isinstance(payload, dict):
-            return ScoreSummary(
-                valid=False, source=source, error="results payload is not an object"
-            )
+        try:
+            if not isinstance(payload, dict):
+                raise ValueError("results payload must be a JSON object")
+            if "properties" not in payload:
+                raise ValueError("missing required top-level 'properties' object")
+            properties = payload["properties"]
+            if not isinstance(properties, dict):
+                raise ValueError("'properties' must be a JSON object keyed by metric name")
+            if not properties:
+                raise ValueError("'properties' must contain at least one metric")
 
-        properties = payload.get("properties")
-        if isinstance(properties, dict):
-            try:
-                comparable_properties = {}
-                for name, prop in properties.items():
-                    if not isinstance(name, str):
-                        raise ValueError("property name is not a string")
-                    if not isinstance(prop, dict):
-                        raise ValueError("property record is not an object")
+            comparable_properties = {}
+            for name, prop in properties.items():
+                if not isinstance(name, str):
+                    raise ValueError("property name must be a string")
+                if not isinstance(prop, dict):
+                    raise ValueError(f"properties[{name!r}] must be a JSON object")
+                try:
                     comparable_prop = self._normalize_property(prop)
-                    comparable_properties[name] = comparable_prop
-                return ScoreSummary(
-                    valid=True,
-                    source=source,
-                    properties=comparable_properties,
-                )
-            except (KeyError, TypeError, ValueError) as e:
-                return ScoreSummary(
-                    valid=False,
-                    source=source,
-                    error=f"invalid properties schema: {e}",
-                )
-
-        return ScoreSummary(
-            valid=False,
-            source=source,
-            error="results payload has no properties",
-        )
+                except ValueError as e:
+                    raise ValueError(f"properties[{name!r}]: {e}") from e
+                comparable_properties[name] = comparable_prop
+            return ScoreSummary(
+                valid=True,
+                source=source,
+                properties=comparable_properties,
+            )
+        except ValueError as e:
+            return ScoreSummary(
+                valid=False,
+                source=source,
+                error=f"Invalid scoring/results.json: {e}. {SCORING_RESULTS_FORMAT_HINT}",
+            )
 
     @staticmethod
     def _finite_float(value: Any, field_name: str) -> float:
@@ -987,7 +999,7 @@ class ScoringResultComparator:
             raise ValueError(f"{field_name} is not numeric")
         try:
             numeric = float(value)
-        except (TypeError, ValueError) as e:
+        except (TypeError, ValueError, OverflowError) as e:
             raise ValueError(f"{field_name} is not numeric") from e
         if not math.isfinite(numeric):
             raise ValueError(f"{field_name} is not finite")
@@ -995,14 +1007,20 @@ class ScoringResultComparator:
 
     @classmethod
     def _normalize_property(cls, prop: Dict[str, Any]) -> Dict[str, Any]:
+        for field_name in ("value", "target", "direction", "satisfied"):
+            if field_name not in prop:
+                raise ValueError(f"missing required field '{field_name}'")
         direction = prop["direction"]
-        if direction not in {"max", "min"}:
-            raise ValueError(f"Unknown direction: {direction}")
+        if direction not in ("max", "min"):
+            raise ValueError(
+                f"direction must be 'max' (higher is better) or 'min' (lower is better); "
+                f"got {direction!r}"
+            )
         value = cls._finite_float(prop["value"], "value")
         target = cls._finite_float(prop["target"], "target")
         satisfied = prop["satisfied"]
         if not isinstance(satisfied, bool):
-            raise ValueError("satisfied is not boolean")
+            raise ValueError("satisfied must be a JSON boolean (true or false)")
         normalized = {
             "value": value,
             "target": target,
