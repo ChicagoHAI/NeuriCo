@@ -56,6 +56,13 @@ Slurm jobs recorded under the workspace's un-archived `dsi-slurm-artifacts/`
 `logs/interrupted/`, then restores the best checkpoint. The interrupted
 attempt's jobs are not resubmitted; the next iteration starts a new attempt.
 
+With `dsi-slurm-native`, the sealed scorer (`scoring/eval.py`) also runs in a
+Slurm job (`srun`, default `--partition=general --gres=gpu:1 --cpus-per-task=8
+--mem=32G`) rather than on the login node. Override the resources with
+`NEURICO_DSI_SCORER_SRUN_ARGS`. `--scorer-timeout` becomes the job's `--time`
+limit, and NeuriCo waits up to an extra `NEURICO_DSI_SCORER_QUEUE_WAIT`
+seconds (default 7200) for the job to be scheduled.
+
 ## Bootstrap an existing workspace
 
 Bootstrap is for a workspace where Standard research already produced useful

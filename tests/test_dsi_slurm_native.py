@@ -136,3 +136,40 @@ def test_controller_persists_progress_after_each_iteration(tmp_path):
     controller.run_iteration = fake_iteration
     controller.run(iterations=3)
     assert seen == [(1, "c1"), (2, "c1"), (3, "c3")]
+
+
+def _scorer_argv(tmp_path, monkeypatch, backend, timeout=600):
+    import core.agent_runner as agent_runner
+    from core.scorer import run_scorer
+
+    (tmp_path / "scoring").mkdir()
+    (tmp_path / "scoring" / "eval.py").write_text("print('hi')\n")
+    seen = {}
+
+    def fake_launch(*, command_argv, timeout, work_dir, **_kwargs):
+        seen["argv"], seen["timeout"] = command_argv, timeout
+        (work_dir / "scoring" / "results.json").write_text("{}")
+        return {"return_code": 0}
+
+    monkeypatch.setattr(agent_runner, "run_prebuilt_cli_agent", fake_launch)
+    monkeypatch.delenv("NEURICO_DSI_SCORER_SRUN_ARGS", raising=False)
+    monkeypatch.delenv("NEURICO_DSI_SCORER_QUEUE_WAIT", raising=False)
+    result = run_scorer(tmp_path, timeout=timeout, python_executable="py", idea=_idea(backend))
+    assert result["success"], result
+    return seen
+
+
+def test_native_scorer_runs_eval_inside_slurm(tmp_path, monkeypatch):
+    seen = _scorer_argv(tmp_path, monkeypatch, "dsi-slurm-native", timeout=600)
+    argv = seen["argv"]
+    assert argv[0] == "srun"
+    assert f"--chdir={tmp_path.resolve()}" in argv
+    assert "--time=12" in argv and "--gres=gpu:1" in argv
+    assert argv[-2:] == ["py", str(tmp_path / "scoring" / "eval.py")]
+    assert seen["timeout"] == 600 + 7200  # queue wait allowance on top of eval time
+
+
+def test_local_scorer_is_unchanged(tmp_path, monkeypatch):
+    seen = _scorer_argv(tmp_path, monkeypatch, "local", timeout=600)
+    assert seen["argv"] == ["py", str(tmp_path / "scoring" / "eval.py")]
+    assert seen["timeout"] == 600
