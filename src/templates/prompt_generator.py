@@ -675,11 +675,59 @@ Location: {run_dir}
 
         skill_root = self._skill_root_for_provider(provider)
         dsi_skill_path = f"{skill_root}/dsi-slurm/SKILL.md"
+        dsi_native_skill_path = f"{skill_root}/dsi-slurm-native/SKILL.md"
         summary_target = "REPORT.md"
         if mode == "comment":
             summary_target = "REPORT.md or the comment-handler summary"
 
         backend_sections = {
+            "dsi-slurm-native": f"""
+════════════════════════════════════════════════════════════════════════════════
+COMPUTE BACKEND: dsi-slurm-native
+════════════════════════════════════════════════════════════════════════════════
+
+NeuriCo is running directly on the DSI cluster (login or head node). This
+workspace is on the cluster's shared filesystem, so Slurm jobs can read and
+write it in place. There is no remote workspace, no SSH hop, and no rsync.
+
+Use the `{skill_root}/dsi-slurm-native/` skill for any training, evaluation,
+or batch execution. Before writing or submitting Slurm jobs, read
+`{dsi_native_skill_path}` and follow its guidance.
+
+This machine is a shared login node: do not run training, evaluation, model
+selection, benchmarking, scored-output generation, smoke tests, or
+result-changing validation here. Local commands may inspect files, edit code,
+prepare scripts, package inputs, and verify results that jobs wrote.
+
+DSI Slurm (`sbatch`, `srun`, `salloc`, run directly here) is the only allowed
+compute surface for experiment workload.
+
+When using this backend:
+
+1. Submit jobs with the workspace root as the working directory
+   (`sbatch --chdir="$PWD"`), so outputs land at the same relative paths.
+2. Run the skill's setup/discovery checks before the first submission.
+   Surface missing account, partition, module, storage, or GPU details in the
+   final report instead of guessing.
+3. Start with a cheap smoke job when possible, then scale to the full run.
+4. Write each job's Slurm logs and `job.json` under
+   `dsi-slurm-artifacts/<JOB_ID>/`. NeuriCo runtime archives that directory
+   into logs after the stage.
+5. Do not leave jobs running when you finish; cancel anything you no longer
+   need with `scancel`.
+6. Do not write important outputs only to node-local scratch; copy them into
+   the workspace before the job ends.
+
+Do not use SSH to `login.ds`, Modal, or any other backend unless the user
+reruns NeuriCo with a different `--compute-backend`.
+
+If `{dsi_native_skill_path}` is missing, `sbatch` is unavailable, or required
+details such as account, partition, or GPU type are unavailable, do not switch
+to another backend. Record the missing requirement clearly in
+{summary_target}, mark the experiment as blocked by configuration, and keep any
+local preparatory work reproducible.
+
+""",
             "dsi-slurm": f"""
 ════════════════════════════════════════════════════════════════════════════════
 COMPUTE BACKEND: dsi-slurm

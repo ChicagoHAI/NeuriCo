@@ -143,9 +143,25 @@ One experiment may submit multiple jobs. Use one directory per job or array ID.
 - `general` is the default partition for unattended batch work and can preempt.
 - `interactive` is for active debugging or Jupyter-style work.
 - `protected` is for short jobs that must avoid preemption.
-- Request GPUs with options such as `--gres=gpu:1`.
+- Request GPUs untyped (`--gres=gpu:1`) so any free GPU type can run the job.
+  Pin a type (for example `--gres=gpu:h100:1`) only for a real need such as
+  more than 40 GB of GPU memory, and say why in the script. Check which GPU
+  nodes are up with `sinfo -p general -h -o "%n %G %t"`; `unk*`, `down*`, and
+  `drain` nodes cannot run jobs.
+- When one run needs more than one GPU (it does not fit in one GPU's memory,
+  or the code supports DDP/FSDP/tensor parallelism and one GPU is too slow),
+  request `--nodes=1 --gres=gpu:N` with CPUs and memory scaled to match, and
+  launch with `torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE` or similar.
+  Most nodes have 4 GPUs. Check that every GPU is actually used.
+- Split independent seeds or configs into a job array (`--array=0-4`, one GPU
+  per task, a separate output path per task) instead of looping inside one
+  job.
 - Request node-local scratch with `--gres=local:<SIZE>`; it appears as
   `/local/scratch/<CNetID>_<JOBID>/` and is deleted when the job releases it.
+- Some compute nodes do not mount `/home`. Keep job tools and environments
+  on shared `/net/...` storage, and `--exclude=<node>` nodes that fail
+  instantly (exit 127, `/home` permission denied, "user env retrieval
+  failed").
 - Probe actual storage paths. Do not assume `/project`, `/scratch`, or a lab
   partition exists.
 

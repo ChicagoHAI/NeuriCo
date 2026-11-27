@@ -13,7 +13,9 @@ it writes.
 from pathlib import Path
 from typing import Optional, Dict, Any
 import json
+import math
 import os
+import shlex
 import sys
 import time
 
@@ -55,6 +57,47 @@ def _resolve_python_executable(work_dir: Path) -> str:
             "Rebuild dependencies under neurico-research-env before scoring."
         )
     return sys.executable
+
+
+# dsi-slurm-native: NeuriCo itself runs on a shared login node, where heavy
+# evaluation is not allowed. eval.py is run inside a Slurm job via `srun`
+# instead (the workspace is on the shared filesystem, so paths are identical).
+DSI_SCORER_SRUN_ARGS_ENV = "NEURICO_DSI_SCORER_SRUN_ARGS"
+DSI_SCORER_QUEUE_WAIT_ENV = "NEURICO_DSI_SCORER_QUEUE_WAIT"
+DEFAULT_DSI_SCORER_SRUN_ARGS = (
+    "--partition=general --gres=gpu:1 --cpus-per-task=8 --mem=32G"
+)
+DEFAULT_DSI_SCORER_QUEUE_WAIT = 7200
+
+
+def _dsi_native_scorer_command(
+    cmd: list, work_dir: Path, timeout: Optional[int]
+) -> tuple[list, Optional[int]]:
+    """Wrap the eval command in `srun` and extend the wall-clock timeout.
+
+    Slurm enforces the evaluation time limit (`--time`); the local timeout
+    additionally allows for queue wait, which can be long on a busy cluster.
+    """
+    extra = shlex.split(
+        os.environ.get(DSI_SCORER_SRUN_ARGS_ENV) or DEFAULT_DSI_SCORER_SRUN_ARGS
+    )
+    srun = [
+        "srun",
+        "--job-name=neurico-scorer",
+        f"--chdir={Path(work_dir).resolve()}",
+        "--kill-on-bad-exit=1",
+        "--quit-on-interrupt",
+        *extra,
+    ]
+    local_timeout = timeout
+    if timeout:
+        srun.append(f"--time={math.ceil(timeout / 60) + 2}")
+        try:
+            queue_wait = int(os.environ.get(DSI_SCORER_QUEUE_WAIT_ENV, DEFAULT_DSI_SCORER_QUEUE_WAIT))
+        except ValueError:
+            queue_wait = DEFAULT_DSI_SCORER_QUEUE_WAIT
+        local_timeout = timeout + max(queue_wait, 0)
+    return srun + list(cmd), local_timeout
 
 
 def run_scorer(
@@ -145,6 +188,12 @@ def run_scorer(
 
     python_executable = python_executable or _resolve_python_executable(work_dir)
     cmd = [python_executable, str(eval_script)]
+    launch_timeout = timeout
+
+    from core.dsi_slurm_remote import is_dsi_slurm_native_backend
+    if is_dsi_slurm_native_backend(idea):
+        cmd, launch_timeout = _dsi_native_scorer_command(cmd, work_dir, timeout)
+        print("   Compute backend dsi-slurm-native: running eval.py in a Slurm job via srun")
 
     print(f"📊 Running scorer: {' '.join(cmd)}")
     print(f"   Working dir: {work_dir}")
@@ -166,7 +215,7 @@ def run_scorer(
             log_file=log_path,
             transcript_file=scoring_dir / "eval_transcript.txt",
             env=os.environ.copy(),
-            timeout=timeout,
+            timeout=launch_timeout,
         )
         return_code = launch.get("return_code")
         stopped = bool(launch.get("stopped"))

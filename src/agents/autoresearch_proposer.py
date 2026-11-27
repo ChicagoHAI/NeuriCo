@@ -85,6 +85,32 @@ def _generate_compute_backend_section(idea_spec: Dict[str, Any], provider: str =
     backend = get_runtime_compute_backend(idea_spec)
     skill_root = provider_skill_root(provider)
     dsi_skill_path = f"{skill_root}/dsi-slurm/SKILL.md"
+    if backend == "dsi-slurm-native":
+        native_skill_path = f"{skill_root}/dsi-slurm-native/SKILL.md"
+        return f"""
+═══════════════════════════════════════════════════════════════════════════════
+                         COMPUTE BACKEND: dsi-slurm-native
+═══════════════════════════════════════════════════════════════════════════════
+
+Runtime execution is pinned to DSI Slurm by `--compute-backend
+dsi-slurm-native`. NeuriCo runs on the cluster itself and the workspace is on
+the shared filesystem, so jobs are submitted with `sbatch` directly from the
+workspace with no SSH or rsync. Any proposal that requires training,
+evaluation, or batch execution must tell comment mode to use
+`{skill_root}/dsi-slurm-native/` by reading `{native_skill_path}` and
+following that skill's guidance.
+
+The proposal must preserve this compute invariant: the login node is for
+orchestration and reporting only. Comment mode must not run training,
+evaluation, model selection, benchmarking, scored-output generation, smoke
+tests, or result-changing validation outside Slurm jobs. Jobs must write
+Slurm logs and `job.json` under `dsi-slurm-artifacts/<JOB_ID>/`.
+
+Do not propose SSH-based submission, Modal, or any other backend. If missing
+DSI Slurm configuration or access would block the proposed change, make that
+blocker explicit in the proposal rather than suggesting a backend switch.
+
+"""
     if backend == "dsi-slurm":
         return f"""
 ═══════════════════════════════════════════════════════════════════════════════

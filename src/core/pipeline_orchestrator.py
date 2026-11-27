@@ -2290,12 +2290,17 @@ class ResearchPipelineOrchestrator:
         dsi_remote_info = None
         try:
             from core.dsi_slurm_remote import (
+                build_native_workspace_info,
                 create_remote_workspace,
                 is_dsi_slurm_backend,
+                is_dsi_slurm_native_backend,
                 remove_remote_workspace,
             )
 
-            if is_dsi_slurm_backend(idea):
+            if is_dsi_slurm_native_backend(idea):
+                dsi_remote_info = build_native_workspace_info(self.work_dir)
+                print(f"DSI native workspace (shared FS): {dsi_remote_info['remote_root']}")
+            elif is_dsi_slurm_backend(idea):
                 dsi_remote_info = create_remote_workspace(self.work_dir)
                 print(f"DSI remote workspace: {dsi_remote_info['remote_root']}")
 
