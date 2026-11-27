@@ -33,7 +33,7 @@ def _git(work_dir, *args):
 
 
 def _workspace(tmp_path):
-    (tmp_path / ".gitignore").write_text("*.pt\n.venv/\nmodels/\n*.log\n")
+    (tmp_path / ".gitignore").write_text("*.pt\n.venv/\nmodels/\n*.log\n.hf_cache/\n")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "train.py").write_text("v = 1\n")
     (tmp_path / "results" / "ckpt").mkdir(parents=True)
@@ -45,6 +45,8 @@ def _workspace(tmp_path):
     (tmp_path / "models").mkdir()
     (tmp_path / "models" / "base.pt").write_text("base model")
     (tmp_path / "run.log").write_text("log")
+    (tmp_path / ".hf_cache" / "hub").mkdir(parents=True)
+    (tmp_path / ".hf_cache" / "hub" / "w.safetensors").write_text("cache")
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-qm", "init")

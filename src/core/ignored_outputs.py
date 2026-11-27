@@ -41,12 +41,13 @@ DEFAULT_MAX_BYTES = 20 * 1024**3
 SKIP_DIR_NAMES = frozenset({
     ".git", ".venv", "venv", "env", "ENV", "node_modules", "__pycache__",
     ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".ipynb_checkpoints",
-    "wandb", "mlruns", "lightning_logs",
+    "wandb", "mlruns", "lightning_logs", "hf_cache", ".hf_cache", "huggingface",
+    ".huggingface", "torch_cache", ".torch", ".triton", ".nv",
 })
 # Top-level workspace directories that hold shared resources or NeuriCo state,
 # not attempt outputs (base models, datasets, agent/tool state, logs, papers).
 SKIP_TOP_LEVEL = frozenset({
-    "models", "datasets", "data", "hf_cache", ".claude", ".gemini", ".codex",
+    "models", "datasets", "data", ".claude", ".gemini", ".codex",
     ".neurico", ".scoring_sealed", "logs", "paper", "paper_draft", "paper_examples",
     "dsi-slurm-artifacts",
 })
