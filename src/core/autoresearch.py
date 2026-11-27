@@ -29,6 +29,11 @@ from core.autoresearch_common import (
 from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_paths import HITL_RELATIVE_ROOT
 from core.research_environment import WORKSPACE_MODE_STATE_RELATIVE_PATH
+from core.ignored_outputs import (
+    SNAPSHOT_PATTERN as IGNORED_OUTPUTS_SNAPSHOT_PATTERN,
+    ensure_ignored_outputs_snapshot,
+    restore_ignored_outputs_snapshot,
+)
 from core.whiteboard import (
     Whiteboard,
     clear_current_attempt_marker,
@@ -60,7 +65,10 @@ AUTORESEARCH_LOG_PATTERNS = (
     "logs/experiment-autoresearch/",
     "logs/bootstrap_baseline/",
 )
-AUTORESEARCH_STATE_PATTERNS = (".neurico/autoresearch_state.json",)
+AUTORESEARCH_STATE_PATTERNS = (
+    ".neurico/autoresearch_state.json",
+    IGNORED_OUTPUTS_SNAPSHOT_PATTERN,
+)
 BOOTSTRAP_BASELINE_STATE_PATTERNS = (".neurico/bootstrap_baseline_state.json",)
 AGENT_LOCAL_PATTERNS = (".claude/", ".gemini/", ".codex/")
 PRIVATE_RUNTIME_PATTERNS = (
@@ -1477,6 +1485,10 @@ def validate_continue_autoresearch_workspace(
         )
         checkpoints.restore_checkpoint(current_best_sha)
         status_lines = _disallowed_dirty()
+    if auto_restore:
+        # An interrupted attempt may also have rewritten git-ignored outputs
+        # (e.g. checkpoints) even when the tracked tree looks clean.
+        restore_ignored_outputs_snapshot(checkpoints.work_dir, current_best_sha)
 
     if status_lines:
         raise ValueError(
@@ -1670,6 +1682,12 @@ class AutoResearchController:
         attempt_dir = self.history.next_attempt_dir(parent_sha)
         attempt_marker = self._attempt_id(attempt_dir)
         self._ensure_whiteboard_before(attempt_dir)
+        # git reset only restores tracked files; keep a copy of the parent's
+        # git-ignored outputs (e.g. model checkpoints the scorer reads) so a
+        # rejected attempt cannot leave its outputs to be scored next time.
+        ensure_ignored_outputs_snapshot(
+            self.work_dir, parent_sha, extra_skip_patterns=CHECKPOINT_EXCLUDE_PATTERNS
+        )
         write_current_attempt_marker(self.work_dir, attempt_marker)
 
         proposal = ""
@@ -1758,6 +1776,7 @@ class AutoResearchController:
                     decision=decision,
                 )
             self.checkpoints.restore_checkpoint(parent_sha)
+            restore_ignored_outputs_snapshot(self.work_dir, parent_sha)
             self._revert_whiteboard_for(attempt_marker)
             clear_current_attempt_marker(self.work_dir)
             return AutoResearchIterationResult(
@@ -1828,6 +1847,7 @@ class AutoResearchController:
             )
         if not accepted:
             self.checkpoints.restore_checkpoint(parent_sha)
+            restore_ignored_outputs_snapshot(self.work_dir, parent_sha)
             self._revert_whiteboard_for(attempt_marker)
         clear_current_attempt_marker(self.work_dir)
         return AutoResearchIterationResult(
