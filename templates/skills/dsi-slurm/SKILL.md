@@ -158,6 +158,10 @@ One experiment may submit multiple jobs. Use one directory per job or array ID.
   job.
 - Request node-local scratch with `--gres=local:<SIZE>`; it appears as
   `/local/scratch/<CNetID>_<JOBID>/` and is deleted when the job releases it.
+- Some compute nodes do not mount `/home`. Keep job tools and environments
+  on shared `/net/...` storage, and `--exclude=<node>` nodes that fail
+  instantly (exit 127, `/home` permission denied, "user env retrieval
+  failed").
 - Probe actual storage paths. Do not assume `/project`, `/scratch`, or a lab
   partition exists.
 

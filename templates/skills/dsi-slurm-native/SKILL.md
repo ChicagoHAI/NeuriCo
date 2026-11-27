@@ -108,6 +108,12 @@ For arrays use `%A/slurm_%A_%a.out` / `.err`.
   Selection).
 - Request node-local scratch with `--gres=local:<SIZE>`; it appears as
   `/local/scratch/<CNetID>_<JOBID>/` and is deleted when the job ends.
+- Some compute nodes do not mount `/home`. Keep the job's tools and
+  environments (Python, `uv`, virtualenvs, caches) on the shared `/net/...`
+  filesystem, or fail fast with a clear message (`command -v uv || exit 127`).
+  If a node keeps failing instantly (exit 127, `mkdir /home` permission
+  denied, "user env retrieval failed"), add it to `--exclude=<node>` and
+  record why.
 - Probe actual storage paths. Do not assume `/project` or a lab partition.
 
 ## GPU Selection
