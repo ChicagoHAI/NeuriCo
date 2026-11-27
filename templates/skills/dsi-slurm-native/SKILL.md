@@ -104,10 +104,67 @@ For arrays use `%A/slurm_%A_%a.out` / `.err`.
 - `general` is the default partition for unattended batch work and can preempt.
 - `interactive` is for active debugging.
 - `protected` is for short jobs that must avoid preemption.
-- Request GPUs with options such as `--gres=gpu:1`.
+- Request GPUs with an untyped request such as `--gres=gpu:1` (see GPU
+  Selection).
 - Request node-local scratch with `--gres=local:<SIZE>`; it appears as
   `/local/scratch/<CNetID>_<JOBID>/` and is deleted when the job ends.
 - Probe actual storage paths. Do not assume `/project` or a lab partition.
+
+## GPU Selection
+
+Default to an untyped request, `--gres=gpu:1`, so the scheduler can place the
+job on any free GPU (A40, A100, H100, H200, L40S, ...). Pinning a type such as
+`--gres=gpu:a40:1` can leave a job pending on `(Resources)` while other GPU
+types sit idle.
+
+Pin a type only when the job really needs it, and say why in a comment in the
+sbatch script:
+
+- **Memory**: if the job needs more than about 40 GB of GPU memory, request a
+  type with 80 GB or more (for example `--gres=gpu:a100:1` on 80 GB nodes,
+  `gpu:h100:1`, `gpu:h200:1`), after checking that type exists and is up.
+- **Consistency**: if results are compared on wall-clock time or throughput,
+  keep the GPU type fixed for the whole comparison and record it. Accuracy
+  comparisons under a fixed step or epoch budget usually do not need this.
+
+Check which GPUs exist and are healthy right now instead of assuming:
+
+```bash
+sinfo -p general -h -o "%n %G %t" | sort -k2
+```
+
+Nodes in state `unk*`, `down*`, or `drain` cannot run jobs. `mix` and `idle`
+nodes have free capacity. Log the GPU each job actually got, for example by
+running `nvidia-smi --query-gpu=name,memory.total --format=csv` at the start
+of the job script so `slurm_<JOB_ID>.out` shows it.
+
+Faster GPUs rarely shorten an AutoResearch iteration much. Queue waits are
+usually short, and most wall time goes to agent work and scoring. Running
+independent work in parallel (next section) usually helps more.
+
+## Parallelize Independent Work
+
+Split independent seeds, configs, or data shards into separate one-GPU jobs
+instead of looping over them inside one job. A job array is the simplest way:
+
+```bash
+#SBATCH --array=0-4
+#SBATCH --gres=gpu:1
+#SBATCH --output=dsi-slurm-artifacts/%A/slurm_%A_%a.out
+#SBATCH --error=dsi-slurm-artifacts/%A/slurm_%A_%a.err
+
+SEED=$SLURM_ARRAY_TASK_ID
+python train.py --seed "$SEED" --out "results/run_seed${SEED}.json"
+```
+
+- Each task must write to its own output path. Merge the results in a
+  separate cheap step after every task has finished.
+- `squeue -j <ARRAY_JOB_ID>` lists all tasks, and
+  `sacct -j <ARRAY_JOB_ID> --format=JobID,State,ExitCode -P` gives one line
+  per task. Once every task is done, write one `job.json` that records each
+  task's state.
+- Keep arrays modest (a handful to a few dozen tasks), cap concurrency with
+  `--array=0-19%8`, and do not flood the shared queue.
 
 ## Safe Submit, Wait, Record
 
