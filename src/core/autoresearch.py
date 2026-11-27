@@ -77,6 +77,7 @@ PAPER_OUTPUT_PATTERNS = (
     "templates/paper_writing/",
     "logs/paper_writer_prompt.txt",
     "logs/paper_writer_*.log",
+    "logs/paper_writer_*.jsonl",
 )
 # Transient dsi-slurm compute state: the remote-workspace contract file and any
 # pulled-back cluster artifacts. Both are normally cleared or archived before a
@@ -86,6 +87,8 @@ PAPER_OUTPUT_PATTERNS = (
 DSI_SLURM_TRANSIENT_PATTERNS = (
     ".neurico/dsi_slurm_remote_workspace.json",
     "dsi-slurm-artifacts/",
+    # Where --continue-recover archives bundles of cancelled stale jobs.
+    "logs/interrupted/",
 )
 
 CHECKPOINT_EXCLUDE_PATTERNS = (
@@ -1339,6 +1342,14 @@ def continue_from_current_best(
     print("=" * 80)
     print()
 
+    if continue_recover:
+        # An interrupted attempt (e.g. NeuriCo killed at a Slurm wall clock)
+        # may have left cluster jobs running that would otherwise keep writing
+        # into the workspace while the next attempt starts.
+        from core.dsi_slurm_remote import cancel_stale_dsi_slurm_jobs
+
+        cancel_stale_dsi_slurm_jobs(idea, work_dir)
+
     current_sha = validate_continue_autoresearch_workspace(
         work_dir, auto_restore=continue_recover
     )
@@ -1394,6 +1405,13 @@ def continue_from_current_best(
         proposal_timeout=proposer_timeout,
         comment_timeout=comment_timeout,
         scorer_timeout=scorer_timeout,
+        on_iteration_complete=lambda iteration, best_sha: write_autoresearch_state(
+            work_dir=work_dir,
+            history_root=history_root,
+            lineage_source_sha=lineage_source_sha,
+            current_best_sha=best_sha,
+            last_iteration=previous_last_iteration + iteration,
+        ),
     )
     payload = autoresearch_result_payload(autoresearch_result)
     payload["initial_sha"] = lineage_source_sha
@@ -1585,12 +1603,12 @@ def _finish_bootstrap_initial_node_attempt(
 
 
 def _is_allowed_continue_dirty_status(status_line: str) -> bool:
-    """Allow known paper-writer outputs to coexist with continuation."""
+    """Allow paper-writer outputs and transient compute state during continuation."""
     rel_path = _status_line_path(status_line)
     if rel_path is None:
         return False
 
-    for pattern in PAPER_OUTPUT_PATTERNS:
+    for pattern in PAPER_OUTPUT_PATTERNS + DSI_SLURM_TRANSIENT_PATTERNS:
         if pattern.endswith("/") and rel_path.startswith(pattern):
             return True
         if fnmatch.fnmatch(rel_path, pattern):
@@ -1624,7 +1642,9 @@ class AutoResearchController:
         checkpoint_manager: Optional[CheckpointManager] = None,
         history_manager: Optional[AttemptHistoryManager] = None,
         comparator: Optional[ScoringResultComparator] = None,
+        on_iteration_complete: Optional[Callable[[int, str], None]] = None,
     ):
+        self.on_iteration_complete = on_iteration_complete
         self.idea = idea
         self.idea_id = idea_id
         self.work_dir = Path(work_dir)
@@ -1650,6 +1670,11 @@ class AutoResearchController:
             results.append(result)
             if result.accepted and result.child_sha:
                 current_best_sha = result.child_sha
+            if self.on_iteration_complete is not None:
+                # Persist progress after every iteration so a later crash
+                # (e.g. a quota error or Slurm wall clock) cannot make
+                # --continue-recover roll back to a pre-accept checkpoint.
+                self.on_iteration_complete(iteration, current_best_sha)
         return AutoResearchRunResult(
             success=True,
             initial_sha=initial.sha,
@@ -1997,6 +2022,7 @@ def run_autoresearch_loop(
     proposal_timeout: int = 900,
     comment_timeout: int = 1800,
     scorer_timeout: int = 600,
+    on_iteration_complete: Optional[Callable[[int, str], None]] = None,
 ) -> AutoResearchRunResult:
     """Run ordinary AutoResearch with NeuriCo's proposer, worker, and scorer."""
     from agents.autoresearch_proposer import run_autoresearch_proposer
@@ -2051,6 +2077,7 @@ def run_autoresearch_loop(
         proposal_generator=proposal_generator,
         comment_mode=comment_mode,
         scorer=scorer,
+        on_iteration_complete=on_iteration_complete,
     )
     return controller.run(iterations=iterations)
 

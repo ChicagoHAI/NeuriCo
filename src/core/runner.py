@@ -1839,11 +1839,12 @@ https://github.com/ChicagoHAI/neurico
             provider_workspace_root(provider)
             for provider in ("claude", "gemini", "codex")
         ]
-        compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm"}
+        compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm", "dsi-slurm-native"}
         backend_skill_names = {
             "local": set(),
             "modal": {"modal-training", "modal-vllm"},
             "dsi-slurm": {"dsi-slurm"},
+            "dsi-slurm-native": {"dsi-slurm-native"},
         }
         selected_compute_skills = backend_skill_names[compute_backend]
         workspace_mode = read_workspace_mode(work_dir)
@@ -2086,7 +2087,7 @@ def main():
     parser.add_argument(
         "--compute-backend",
         default="local",
-        choices=["local", "dsi-slurm", "modal"],
+        choices=["local", "dsi-slurm", "dsi-slurm-native", "modal"],
         help="Compute backend for experiment/comment execution (default: local)",
     )
     parser.add_argument(

@@ -816,7 +816,7 @@ def main():
     parser.add_argument(
         "--compute-backend",
         default="local",
-        choices=["local", "dsi-slurm", "modal"],
+        choices=["local", "dsi-slurm", "dsi-slurm-native", "modal"],
         help="Compute backend for experiment/comment agents (default: local)",
     )
     parser.add_argument("--run-id", required=True, help="Unique identifier for this invocation")

@@ -280,7 +280,7 @@ when you want one complete pass without iterative improvement.
 | --- | --- | --- |
 | `--provider claude\|codex\|gemini` | `claude` | Select the research worker provider |
 | `--model NAME` | provider CLI default | Select the model every agent stage runs, e.g. `claude-opus-5-5` or `gpt-5.6-sol` |
-| `--compute-backend local\|dsi-slurm\|modal` | `local` | Select where experiments execute |
+| `--compute-backend local\|dsi-slurm\|dsi-slurm-native\|modal` | `local` | Select where experiments execute |
 | `--timeout SECONDS` | `3600` | Set the experiment-runner timeout |
 | `--no-full-permissions` | full permissions | Restore normal provider permission prompts |
 | `--no-write-paper` | paper enabled | Skip paper generation |
@@ -295,6 +295,7 @@ when you want one complete pass without iterative improvement.
 | --- | --- |
 | `modal` | Run `modal token new` on the host. Docker automatically mounts `~/.modal.toml`. |
 | `dsi-slurm` | Requires University of Chicago DSI cluster access and an SSH host configured as `login.ds`. |
+| `dsi-slurm-native` | Run NeuriCo (local `uv`) directly on the DSI cluster. Jobs are submitted with `sbatch` from the workspace on the shared filesystem — no SSH or rsync. With `--continue-recover`, Slurm jobs left by an interrupted attempt are cancelled. |
 
 </details>
 

@@ -37,6 +37,25 @@ checkpoint, discards the incomplete attempt, and continues:
 | --- | --- |
 | `./neurico run <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --continue-recover --autoresearch-iterations 3` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --continue-recover --autoresearch-iterations 3` |
 
+### Long runs on the DSI cluster
+
+When NeuriCo runs on the DSI cluster itself, use `--compute-backend
+dsi-slurm-native`. The agent submits each experiment as its own `sbatch` job
+from the workspace (on the shared filesystem), so no single job has to cover
+the whole AutoResearch run. Keep the controller alive on the login node (for
+example in `tmux`), and if it is interrupted, resume with:
+
+```bash
+uv run python src/core/runner.py <idea_id> --compute-backend dsi-slurm-native \
+  --continue-autoresearch --continue-recover --autoresearch-iterations N
+```
+
+With `dsi-slurm` or `dsi-slurm-native`, `--continue-recover` first cancels the
+Slurm jobs recorded under the workspace's un-archived `dsi-slurm-artifacts/`
+(the interrupted attempt's jobs) and moves those bundles to
+`logs/interrupted/`, then restores the best checkpoint. The interrupted
+attempt's jobs are not resubmitted; the next iteration starts a new attempt.
+
 ## Bootstrap an existing workspace
 
 Bootstrap is for a workspace where Standard research already produced useful

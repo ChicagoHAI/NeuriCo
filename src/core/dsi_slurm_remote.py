@@ -18,8 +18,29 @@ _VALID_WORKSPACE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def is_dsi_slurm_backend(idea: Dict[str, Any]) -> bool:
-    """Return True only when the runtime flag selects dsi-slurm compute."""
+    """Return True only when the runtime flag selects dsi-slurm (SSH) compute."""
     return get_runtime_compute_backend(idea) == "dsi-slurm"
+
+
+def is_dsi_slurm_native_backend(idea: Dict[str, Any]) -> bool:
+    """Return True when NeuriCo itself runs on the DSI cluster (no SSH/rsync)."""
+    return get_runtime_compute_backend(idea) == "dsi-slurm-native"
+
+
+def build_native_workspace_info(work_dir: Path) -> Dict[str, str]:
+    """
+    Workspace contract for dsi-slurm-native.
+
+    The local workspace is already on the cluster's shared filesystem, so the
+    "remote" root is the workspace itself. Runtime never creates or removes it.
+    """
+    return {
+        "backend": "dsi-slurm-native",
+        "ssh_host": "",
+        "workspace_name": Path(work_dir).name,
+        "remote_root": str(Path(work_dir).resolve()),
+        "rsync_remote_root": "",
+    }
 
 
 def remote_workspace_info_path(work_dir: Path) -> Path:
@@ -142,8 +163,13 @@ def dsi_slurm_remote_workspace(
     """
     Runtime lifecycle shell for dsi-slurm stages.
 
-    No-op unless --compute-backend is exactly dsi-slurm.
+    No-op unless --compute-backend is dsi-slurm or dsi-slurm-native. The native
+    backend yields the workspace itself and never creates or removes anything.
     """
+    if is_dsi_slurm_native_backend(idea):
+        yield build_native_workspace_info(work_dir)
+        return
+
     if not is_dsi_slurm_backend(idea):
         yield None
         return
@@ -156,3 +182,55 @@ def dsi_slurm_remote_workspace(
             remove_remote_workspace(work_dir, run=run)
         except Exception as exc:
             print(f"Warning: failed to remove dsi-cluster remote workspace: {exc}")
+
+
+def _job_ids_from_artifacts(work_dir: Path) -> list:
+    root = Path(work_dir) / "dsi-slurm-artifacts"
+    if not root.is_dir():
+        return []
+    return sorted(
+        child.name for child in root.iterdir()
+        if child.is_dir() and re.fullmatch(r"[0-9]+", child.name)
+    )
+
+
+def cancel_stale_dsi_slurm_jobs(
+    idea: Dict[str, Any],
+    work_dir: Path,
+    *,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> list:
+    """
+    Cancel Slurm jobs left behind by an interrupted attempt.
+
+    Jobs are discovered from the workspace's un-archived
+    ``dsi-slurm-artifacts/<JOB_ID>/`` bundles, then the stale bundles are
+    moved into ``logs/`` so they neither block --continue-recover (untracked
+    files) nor leak into the next attempt. Returns the job IDs passed to
+    scancel. Never raises: recovery should proceed even if Slurm is unreachable.
+    """
+    from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
+
+    if not (is_dsi_slurm_backend(idea) or is_dsi_slurm_native_backend(idea)):
+        return []
+    job_ids = _job_ids_from_artifacts(work_dir)
+    if job_ids:
+        scancel = ["scancel", *job_ids]
+        if is_dsi_slurm_backend(idea):
+            scancel = [
+                "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+                "login.ds", " ".join(shlex.quote(part) for part in scancel),
+            ]
+        try:
+            run(scancel, check=False, text=True, capture_output=True)
+            print(f"⚠️  Cancelled stale Slurm job(s) from interrupted attempt: {', '.join(job_ids)}")
+        except Exception as exc:
+            print(f"Warning: failed to cancel stale Slurm jobs {job_ids}: {exc}")
+    try:
+        move_dsi_slurm_artifacts(
+            work_dir,
+            Path(work_dir) / "logs" / "interrupted" / DSI_SLURM_ARTIFACTS_DIR,
+        )
+    except Exception as exc:
+        print(f"Warning: failed to archive stale dsi-slurm-artifacts: {exc}")
+    return job_ids

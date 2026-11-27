@@ -6,7 +6,7 @@ import copy
 from typing import Any, Dict, Optional
 
 
-VALID_COMPUTE_BACKENDS = ("local", "dsi-slurm", "modal")
+VALID_COMPUTE_BACKENDS = ("local", "dsi-slurm", "dsi-slurm-native", "modal")
 RUNTIME_COMPUTE_BACKEND_KEY = "_runtime_compute_backend"
 
 
