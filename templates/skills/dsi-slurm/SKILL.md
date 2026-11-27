@@ -148,6 +148,11 @@ One experiment may submit multiple jobs. Use one directory per job or array ID.
   more than 40 GB of GPU memory, and say why in the script. Check which GPU
   nodes are up with `sinfo -p general -h -o "%n %G %t"`; `unk*`, `down*`, and
   `drain` nodes cannot run jobs.
+- When one run needs more than one GPU (it does not fit in one GPU's memory,
+  or the code supports DDP/FSDP/tensor parallelism and one GPU is too slow),
+  request `--nodes=1 --gres=gpu:N` with CPUs and memory scaled to match, and
+  launch with `torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE` or similar.
+  Most nodes have 4 GPUs. Check that every GPU is actually used.
 - Split independent seeds or configs into a job array (`--array=0-4`, one GPU
   per task, a separate output path per task) instead of looping inside one
   job.

@@ -140,7 +140,39 @@ of the job script so `slurm_<JOB_ID>.out` shows it.
 
 Faster GPUs rarely shorten an AutoResearch iteration much. Queue waits are
 usually short, and most wall time goes to agent work and scoring. Running
-independent work in parallel (next section) usually helps more.
+independent work in parallel (see Parallelize Independent Work) usually
+helps more.
+
+## Multiple GPUs in One Job
+
+Request several GPUs in one job when a single run needs them, for example:
+
+- the model, optimizer state, and activations do not fit on one GPU even with
+  a smaller batch, gradient checkpointing, or mixed precision;
+- one training run would take too long on one GPU and the code supports data
+  parallelism (DDP, FSDP, DeepSpeed, `accelerate`), or tensor or pipeline
+  parallelism for inference (for example vLLM `tensor_parallel_size`).
+
+```bash
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=256G
+
+torchrun --standalone --nproc_per_node="$SLURM_GPUS_ON_NODE" train.py ...
+```
+
+- Size the request to the need. Asking for more GPUs than a node has, or than
+  are free, leaves the job pending. Most `general` nodes have 4 GPUs, some
+  have 8. Stay on one node (`--nodes=1`) unless the code is set up for
+  multi-node training.
+- Scale CPUs and memory with the GPU count (roughly 8 CPUs per GPU).
+- Make sure the code actually uses every GPU. A plain `python train.py`
+  normally uses only one. Check `nvidia-smi` output in the job log, or log
+  the world size from inside the job.
+- If the runs are independent (different seeds or configs), use a job array
+  of one-GPU tasks instead (next section). It schedules sooner and is easier
+  to recover.
 
 ## Parallelize Independent Work
 
